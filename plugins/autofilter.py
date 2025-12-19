@@ -17,10 +17,19 @@ async def filter_handler(client, message):
     if message.text.startswith("/"):
         return
     
+    user_id = message.from_user.id
+    is_prm = await is_premium(user_id, client)
+    
+    # --- PM सर्च कंट्रोल लॉजिक ---
     if message.chat.type == enums.ChatType.PRIVATE:
-        stg = db.get_bot_sttgs()
-        if stg and not stg.get('PM_SEARCH'):
-            return await message.reply_text('PM search is disabled by Admin!')
+        # अगर यूजर एडमिन नहीं है और प्रीमियम भी नहीं है, तो कॉन्फ़िगरेशन चेक करें
+        if user_id not in ADMINS and not is_prm:
+            # डेटाबेस से चेक करें कि क्या एडमिन ने 'PM_SEARCH_FOR_ALL' ऑन किया है
+            pm_search_all = await db.get_config('PM_SEARCH_FOR_ALL')
+            if not pm_search_all:
+                return await message.reply_text(
+                    "<b>❌ ᴘᴍ sᴇᴀʀᴄʜ ᴅɪsᴀʙʟᴇᴅ</b>\n\nप्रीमियम यूजर्स ही PM में सर्च कर सकते हैं। आप हमारे ग्रुप में सर्च करें या प्रीमियम प्लान लें।"
+                )
 
     search = re.sub(r"\s+", " ", re.sub(r"[-:\"';!]", " ", message.text)).strip()
     if not search: return
@@ -40,81 +49,63 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
             return await reply_msg.edit(f"क्षमा करें, `{search}` नहीं मिला।")
 
     req = message.from_user.id if message.from_user else 0
-    # की (key) को मैसेज आईडी से लिंक करें ताकि यूनीक रहे
+    is_prm = await is_premium(req, client) # प्रीमियम स्टेटस चेक
     key = f"{message.chat.id}-{message.id}"
     temp.FILES[key] = files
     BUTTONS[key] = search
 
     btn = []
-    if settings['links']:
-        files_link = get_file_list_string(files, message.chat.id)
-    else:
-        files_link = ""
-        for file in files:
+    
+    # --- फ़ाइल बटन और शॉर्टलिंक लॉजिक ---
+    for file in files:
+        if is_prm:
+            # प्रीमियम यूजर को सीधा बटन (callback_data) मिलेगा
             btn.append([InlineKeyboardButton(f"[{get_size(file['file_size'])}] {file['file_name']}", callback_data=f"file#{file['_id']}")])
+        else:
+            # नॉन-प्रीमियम को शॉर्टलिंक वाला URL बटन मिलेगा
+            f_link = await get_shortlink(settings['url'], settings['api'], f"https://t.me/{temp.U_NAME}?start=file_{message.chat.id}_{file['_id']}")
+            btn.append([InlineKeyboardButton(f"⚡ [{get_size(file['file_size'])}] {file['file_name']}", url=f_link)])
 
     # पेजिनेशन बटन लॉजिक
-    pagination_row = [
-        InlineKeyboardButton(f"{math.ceil(int(offset) / MAX_BTN) + 1}/{math.ceil(int(total) / MAX_BTN)}", callback_data="pages")
-    ]
-    
+    pagination_row = [InlineKeyboardButton(f"{math.ceil(int(offset) / MAX_BTN) + 1}/{math.ceil(int(total) / MAX_BTN)}", callback_data="pages")]
     if n_offset != "":
         pagination_row.append(InlineKeyboardButton("ɴᴇxᴛ »", callback_data=f"next_{req}_{key}_{n_offset}"))
-    
     if offset != 0:
         pagination_row.insert(0, InlineKeyboardButton("« ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{int(offset)-MAX_BTN}"))
     
     btn.append(pagination_row)
-
     btn.insert(0, [
         InlineKeyboardButton("🌐 ʟᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}#{req}#{offset}"),
         InlineKeyboardButton("🔍 ǫᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}#{req}#{offset}")
     ])
 
-    btn.append([InlineKeyboardButton('🤑 ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ', url=f"https://t.me/{temp.U_NAME}?start=premium")])
+    if not is_prm:
+        btn.append([InlineKeyboardButton('🤑 ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ (ɴᴏ ʟɪɴᴋs)', url=f"https://t.me/{temp.U_NAME}?start=premium")])
 
     cap, poster = await get_imdb_metadata(search, files, settings)
     
     if is_edit:
-        # अगर पोस्टर है, तो edit_media यूज़ करें, वरना edit_text
         try:
             if poster and poster != "https://telegra.ph/file/default_poster.jpg":
-                await reply_msg.edit_media(
-                    media=InputMediaPhoto(poster, caption=cap),
-                    reply_markup=InlineKeyboardMarkup(btn)
-                )
+                await reply_msg.edit_media(media=InputMediaPhoto(poster, caption=cap), reply_markup=InlineKeyboardMarkup(btn))
             else:
                 await reply_msg.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn))
-        except Exception as e:
-            print(f"Edit Error: {e}")
+        except: pass
     else:
-        # पहली बार सर्च करने पर नया मैसेज भेजें
-        await send_metadata_reply(message, cap, poster, InlineKeyboardMarkup(btn), settings, files_link)
+        await send_metadata_reply(message, cap, poster, InlineKeyboardMarkup(btn), settings, "")
         await reply_msg.delete()
 
-@Client.on_callback_query(filters.regex(r"^next"))
-async def next_page_handler(bot, query: CallbackQuery):
-    _, req, key, offset = query.data.split("_")
-    if int(req) not in [query.from_user.id, 0]:
-        return await query.answer("यह आपके लिए नहीं है!", show_alert=True)
-
-    search = BUTTONS.get(key)
-    if not search: 
-        return await query.answer("पुरानी रिक्वेस्ट है, फिर से सर्च करें।", show_alert=True)
-
-    # edit_message_text के लिए auto_filter को दोबारा कॉल करें
-    # यहाँ reply_msg की जगह query.message भेजें और is_edit=True रखें
-    await auto_filter(bot, query.message.reply_to_message, query.message, search, offset=int(offset), is_edit=True)
-    await query.answer()
-
-async def suggest_spelling(message, reply_msg, search):
-    btn = [[
-        InlineKeyboardButton("🔎 Search Google", url=f"https://www.google.com/search?q={search.replace(' ', '+')}")
-    ],[
-        InlineKeyboardButton("🚫 Close", callback_data="close_data")
-    ]]
-    await reply_msg.edit(
-        f"👋 Hello {message.from_user.mention if message.from_user else 'User'},\n\nमुझे डेटाबेस में <b>'{search}'</b> नहीं मिला।",
-        reply_markup=InlineKeyboardMarkup(btn)
-    )
+# --- एडमिन के लिए PM सर्च कंट्रोल कमांड ---
+@Client.on_message(filters.command('set_pm_search') & filters.user(ADMINS))
+async def set_pm_search_config(client, message):
+    if len(message.command) < 2:
+        return await message.reply("उपयोग: `/set_pm_search on` या `/set_pm_search off`")
+    
+    choice = message.command[1].lower()
+    if choice == "on":
+        await db.set_config('PM_SEARCH_FOR_ALL', True)
+        await message.reply("✅ अब नॉन-प्रीमियम यूजर्स भी PM में सर्च कर सकते हैं।")
+    else:
+        await db.set_config('PM_SEARCH_FOR_ALL', False)
+        await message.reply("❌ अब PM सर्च केवल प्रीमियम यूजर्स के लिए है।")
 
