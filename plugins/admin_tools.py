@@ -1,12 +1,13 @@
 import os
+import sys
 import time
 import asyncio
 from hydrogram import Client, filters, enums
 from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from info import ADMINS, LOG_CHANNEL, PICS, SECOND_FILES_DATABASE_URL, script, temp, INDEX_CHANNELS
+from info import ADMINS, LOG_CHANNEL, PICS, SECOND_FILES_DATABASE_URL, script, INDEX_CHANNELS
 from database.users_chats_db import db
 from database.ia_filterdb import db_count_documents, second_db_count_documents, delete_files
-from utils import get_size, get_readable_time
+from utils import get_size, get_readable_time, temp
 
 @Client.on_message(filters.command('stats') & filters.user(ADMINS))
 async def stats_cmd(bot, message):
@@ -124,3 +125,4 @@ async def broadcast_handler(bot, message):
             await db.delete_user(user['id'])
     
     await sts.edit(f"ब्रॉडकास्ट पूरा हुआ!\nसफलता: {success}\nविफलता: {failed}")
+
