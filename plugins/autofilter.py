@@ -1,6 +1,5 @@
 import re
 import math
-import time
 import asyncio
 from hydrogram import Client, filters, enums
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto
@@ -9,9 +8,6 @@ from database.users_chats_db import db
 from database.ia_filterdb import get_search_results
 from utils import get_settings, get_size, is_premium, get_shortlink, get_readable_time, temp
 from .metadata import get_imdb_metadata, get_file_list_string, send_metadata_reply
-
-# इन-मेमोरी स्टोरेज
-BUTTONS = {}
 
 @Client.on_message(filters.text & filters.incoming & (filters.group | filters.private))
 async def filter_handler(client, message):
@@ -47,9 +43,9 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
     req = message.from_user.id if message.from_user else 0
     is_prm = await is_premium(req, client)
     
-    msg_id = message.id if not is_edit else message.reply_to_message.id
-    key = f"{req}_{msg_id}"
-    BUTTONS[key] = search
+    # "Old Request" एरर से बचने के लिए सर्च क्वेरी को छोटा (shorten) करें
+    # Telegram के callback_data की लिमिट 64 bytes है
+    short_search = search[:20] 
 
     btn = []
     files_link = ""
@@ -67,15 +63,20 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
 
     pagination_row = []
     if offset != 0:
-        pagination_row.append(InlineKeyboardButton("« ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{int(offset)-MAX_BTN}"))
+        # बैक बटन में सर्च क्वेरी सीधा पास की गई है
+        pagination_row.append(InlineKeyboardButton("« ʙᴀᴄᴋ", callback_data=f"next_{req}_{int(offset)-MAX_BTN}_{short_search}"))
+    
     pagination_row.append(InlineKeyboardButton(f"{math.ceil(int(offset) / MAX_BTN) + 1}/{math.ceil(int(total) / MAX_BTN)}", callback_data="pages"))
+    
     if n_offset != "":
-        pagination_row.append(InlineKeyboardButton("ɴᴇxᴛ »", callback_data=f"next_{req}_{key}_{n_offset}"))
+        # नेक्स्ट बटन में भी सर्च क्वेरी सीधा डेटा में है
+        pagination_row.append(InlineKeyboardButton("ɴᴇxᴛ »", callback_data=f"next_{req}_{n_offset}_{short_search}"))
     
     btn.append(pagination_row)
+    
     btn.insert(0, [
-        InlineKeyboardButton("🌐 ʟᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}#{req}#{offset}"),
-        InlineKeyboardButton("🔍 ǫᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}#{req}#{offset}")
+        InlineKeyboardButton("🌐 ʟᴀɴɢᴜᴀɢᴇ", callback_data=f"lang#{req}#{offset}#{short_search}"),
+        InlineKeyboardButton("🔍 ǫᴜᴀʟɪᴛʏ", callback_data=f"qual#{req}#{offset}#{short_search}")
     ])
 
     if not is_prm:
@@ -97,36 +98,23 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
 @Client.on_callback_query(filters.regex(r"^next"))
 async def next_page_handler(bot, query: CallbackQuery):
     data = query.data.split("_")
-    try:
-        req = int(data[1])
-        key = data[2]
-        offset = int(data[3])
-    except:
-        return await query.answer("डेटा एरर!", show_alert=True)
+    # डेटा फॉर्मेट: ['next', user_id, offset, search_query]
+    req = int(data[1])
+    offset = int(data[2])
+    search = data[3]
 
     if req not in [query.from_user.id, 0]:
         return await query.answer("यह आपके लिए नहीं है!", show_alert=True)
 
-    search = BUTTONS.get(key)
-    if not search: 
-        return await query.answer("पुरानी रिक्वेस्ट है, फिर से सर्च करें।", show_alert=True)
-
+    # अब हमें BUTTONS डिक्शनरी की जरूरत ही नहीं है!
     await auto_filter(bot, query.message.reply_to_message, query.message, search, offset=offset, is_edit=True)
     await query.answer()
 
-# --- सुधारा हुआ suggest_spelling फंक्शन ---
 async def suggest_spelling(message, reply_msg, search):
-    btn = [[
-        InlineKeyboardButton("🔎 Search Google", url=f"https://www.google.com/search?q={search.replace(' ', '+')}")
-    ],[
-        InlineKeyboardButton("🚫 Close", callback_data="close_data")
-    ]]
-    await reply_msg.edit(
-        f"👋 Hello {message.from_user.mention if message.from_user else 'User'},\n\nमुझे डेटाबेस में <b>'{search}'</b> नहीं मिला।",
-        reply_markup=InlineKeyboardMarkup(btn)
-    )
+    btn = [[InlineKeyboardButton("🔎 Search Google", url=f"https://www.google.com/search?q={search.replace(' ', '+')}")],
+            [InlineKeyboardButton("🚫 Close", callback_data="close_data")]]
+    await reply_msg.edit(f"👋 Hello {message.from_user.mention if message.from_user else 'User'},\n\nमुझे डेटाबेस में <b>'{search}'</b> नहीं मिला।", reply_markup=InlineKeyboardMarkup(btn))
 
-# --- एडमिन कमांड्स ---
 @Client.on_message(filters.command('set_pm_search') & filters.user(ADMINS))
 async def set_pm_search_config(client, message):
     choice = message.command[1].lower() if len(message.command) > 1 else ""
