@@ -1,6 +1,6 @@
 import re
 import math
-import time  # <--- यह लाइन एरर फिक्स करेगी
+import time
 import asyncio
 from hydrogram import Client, filters, enums
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto
@@ -47,19 +47,19 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
     req = message.from_user.id if message.from_user else 0
     is_prm = await is_premium(req, client)
     
-    # यूनीक की (key) मैनेजमेंट - time अब इम्पोर्टेड है
-    key = f"{req}_{offset}_{math.ceil(time.time())}" 
-    temp.FILES[key] = files
+    # Key को और भी यूनिक और स्टेबल बनाना
+    # यहाँ हम message.id का इस्तेमाल करेंगे ताकि वह सेशन के दौरान बना रहे
+    key = f"{req}_{message.id if not is_edit else message.reply_to_message.id}"
     BUTTONS[key] = search
 
     btn = []
     files_link = ""
 
-    # लिंक मोड चेक
+    # लिंक मोड रिकवरी (स्क्रीनशॉट के अनुसार)
     if settings['links']:
         files_link = get_file_list_string(files, message.chat.id)
     
-    # बटन मोड चेक (सिर्फ तभी जब लिंक मोड ऑफ हो)
+    # बटन मोड (अगर लिंक मोड ऑफ है)
     if not settings['links']:
         for file in files:
             if is_prm:
@@ -68,13 +68,15 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
                 f_link = await get_shortlink(settings['url'], settings['api'], f"https://t.me/{temp.U_NAME}?start=file_{message.chat.id}_{file['_id']}")
                 btn.append([InlineKeyboardButton(f"⚡ [{get_size(file['file_size'])}] {file['file_name']}", url=f_link)])
 
-    # पेजिनेशन बटन
-    pagination_row = [InlineKeyboardButton(f"{math.ceil(int(offset) / MAX_BTN) + 1}/{math.ceil(int(total) / MAX_BTN)}", callback_data="pages")]
+    # पेजिनेशन बटन (Next/Back)
+    pagination_row = []
+    if offset != 0:
+        pagination_row.append(InlineKeyboardButton("« ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{int(offset)-MAX_BTN}"))
+    
+    pagination_row.append(InlineKeyboardButton(f"{math.ceil(int(offset) / MAX_BTN) + 1}/{math.ceil(int(total) / MAX_BTN)}", callback_data="pages"))
     
     if n_offset != "":
         pagination_row.append(InlineKeyboardButton("ɴᴇxᴛ »", callback_data=f"next_{req}_{key}_{n_offset}"))
-    if offset != 0:
-        pagination_row.insert(0, InlineKeyboardButton("« ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{int(offset)-MAX_BTN}"))
     
     btn.append(pagination_row)
     
@@ -94,8 +96,10 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
                 await reply_msg.edit_media(media=InputMediaPhoto(poster, caption=cap), reply_markup=InlineKeyboardMarkup(btn))
             else:
                 await reply_msg.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn))
-        except: pass
+        except Exception as e:
+            print(f"Edit Error: {e}")
     else:
+        # यहाँ files_link पास करना सुनिश्चित करें ताकि टेक्स्ट लिस्ट दिखे
         await send_metadata_reply(message, cap, poster, InlineKeyboardMarkup(btn), settings, files_link)
         await reply_msg.delete()
 
@@ -112,21 +116,11 @@ async def next_page_handler(bot, query: CallbackQuery):
     if req not in [query.from_user.id, 0]:
         return await query.answer("यह आपके लिए नहीं है!", show_alert=True)
 
+    # BUTTONS से सर्च क्वेरी निकालें
     search = BUTTONS.get(key)
     if not search: 
         return await query.answer("पुरानी रिक्वेस्ट है, फिर से सर्च करें।", show_alert=True)
 
+    # edit मोड में auto_filter चलाएं
     await auto_filter(bot, query.message.reply_to_message, query.message, search, offset=offset, is_edit=True)
     await query.answer()
-
-@Client.on_message(filters.command('set_pm_search') & filters.user(ADMINS))
-async def set_pm_search_config(client, message):
-    choice = message.command[1].lower() if len(message.command) > 1 else ""
-    if choice == "on":
-        await db.set_config('PM_SEARCH_FOR_ALL', True)
-        await message.reply("✅ अब नॉन-प्रीमियम यूजर्स भी PM में सर्च कर सकते हैं।")
-    elif choice == "off":
-        await db.set_config('PM_SEARCH_FOR_ALL', False)
-        await message.reply("❌ अब PM सर्च केवल प्रीमियम यूजर्स के लिए है।")
-    else:
-        await message.reply("उपयोग: `/set_pm_search on/off`")
