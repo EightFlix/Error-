@@ -6,12 +6,14 @@ from hydrogram import Client, filters
 from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from hydrogram.errors import ListenerTimeout
 
+# temp को यहाँ से हटा दिया गया है
 from info import (
     ADMINS, IS_PREMIUM, PRE_DAY_AMOUNT, UPI_ID, UPI_NAME, 
-    RECEIPT_SEND_USERNAME, script, temp
+    RECEIPT_SEND_USERNAME, script
 )
 from database.users_chats_db import db
-from utils import is_premium, get_readable_time
+# temp को यहाँ utils से इम्पोर्ट किया गया है
+from utils import is_premium, get_readable_time, temp
 
 # --- Commands ---
 
@@ -52,8 +54,10 @@ async def myplan_cmd(client, message):
 @Client.on_message(filters.command('add_prm') & filters.user(ADMINS))
 async def add_premium_admin(bot, message):
     try:
-        _, user_id, duration = message.text.split(' ')
-        days = int(duration[:-1]) # e.g., '7d' -> 7
+        args = message.text.split(' ')
+        user_id = int(args[1])
+        duration = args[2]
+        days = int(duration[:-1]) 
     except:
         return await message.reply('उपयोग: /add_prm user_id 7d')
 
@@ -75,13 +79,13 @@ async def add_premium_admin(bot, message):
 @Client.on_message(filters.command('rm_prm') & filters.user(ADMINS))
 async def remove_premium_admin(bot, message):
     try:
-        _, user_id = message.text.split(' ')
+        user_id = int(message.text.split(' ')[1])
     except:
         return await message.reply('उपयोग: /rm_prm user_id')
 
-    mp = db.get_plan(int(user_id))
+    mp = db.get_plan(user_id)
     mp.update({'expire': '', 'plan': '', 'premium': False})
-    db.update_plan(int(user_id), mp)
+    db.update_plan(user_id, mp)
     await message.reply("यूजर को प्रीमियम लिस्ट से हटा दिया गया है।")
 
 @Client.on_message(filters.command('prm_list') & filters.user(ADMINS))
@@ -89,18 +93,23 @@ async def premium_list_admin(bot, message):
     tx = await message.reply('लिस्ट निकाली जा रही है...')
     users = db.get_premium_users()
     text = 'प्रीमियम यूजर्स:\n\n'
+    count = 0
     for u_data in users:
-        if u_data['status']['premium']:
+        if u_data.get('status', {}).get('premium'):
             text += f"ID: `{u_data['id']}` | प्लान: {u_data['status']['plan']}\n"
-    await tx.edit_text(text)
+            count += 1
+    if count == 0:
+        await tx.edit_text("कोई प्रीमियम यूजर नहीं मिला।")
+    else:
+        await tx.edit_text(text)
 
 # --- Callbacks ---
 
 @Client.on_callback_query(filters.regex('^activate_trial'))
 async def trial_callback(bot, query: CallbackQuery):
     mp = db.get_plan(query.from_user.id)
-    if mp['trial']:
-        return await query.message.edit('आपने पहले ही ट्रायल इस्तेमाल कर लिया है।')
+    if mp.get('trial'):
+        return await query.answer('आपने पहले ही ट्रायल इस्तेमाल कर लिया है।', show_alert=True)
     
     ex = datetime.now() + timedelta(hours=1)
     mp.update({'expire': ex, 'trial': True, 'plan': '1 Hour Trial', 'premium': True})
@@ -128,7 +137,8 @@ async def plan_activation_callback(bot, query: CallbackQuery):
         path, 
         caption=f"प्लान: {days} दिन\nराशि: ₹{amount}\n\nइस QR को स्कैन करके भुगतान करें और रसीद का फोटो यहाँ भेजें (10 मिनट में)।"
     )
-    os.remove(path)
+    if os.path.exists(path):
+        os.remove(path)
 
     try:
         receipt = await bot.listen(chat_id=query.message.chat.id, user_id=query.from_user.id, timeout=600)
@@ -139,3 +149,4 @@ async def plan_activation_callback(bot, query: CallbackQuery):
             await receipt.reply('कृपया फोटो भेजें। सहायता के लिए एडमिन से संपर्क करें।')
     except ListenerTimeout:
         await query.message.reply('भुगतान रसीद भेजने का समय समाप्त हो गया।')
+
