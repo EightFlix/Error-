@@ -10,7 +10,7 @@ from database.ia_filterdb import get_search_results
 from utils import get_settings, get_size, is_premium, get_shortlink, get_readable_time, temp
 from .metadata import get_imdb_metadata, get_file_list_string, send_metadata_reply
 
-# इन-मेमोरी स्टोरेज (Stability के लिए इसे बना रहने दें)
+# इन-मेमोरी स्टोरेज
 BUTTONS = {}
 
 @Client.on_message(filters.text & filters.incoming & (filters.group | filters.private))
@@ -23,7 +23,6 @@ async def filter_handler(client, message):
     
     if message.chat.type == enums.ChatType.PRIVATE:
         if user_id not in ADMINS and not is_prm:
-            # डेटाबेस से कॉन्फ़िगरेशन चेक करें
             pm_search_all = await db.get_config('PM_SEARCH_FOR_ALL')
             if not pm_search_all:
                 return await message.reply_text("<b>❌ ᴘᴍ sᴇᴀʀᴄʜ ᴅɪsᴀʙʟᴇᴅ</b>\n\nप्रीमियम यूजर्स ही PM में सर्च कर सकते हैं।")
@@ -48,7 +47,6 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
     req = message.from_user.id if message.from_user else 0
     is_prm = await is_premium(req, client)
     
-    # Key को मैसेज आईडी के साथ स्टेबल बनाएं ताकि 'Old Request' एरर न आए
     msg_id = message.id if not is_edit else message.reply_to_message.id
     key = f"{req}_{msg_id}"
     BUTTONS[key] = search
@@ -56,11 +54,9 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
     btn = []
     files_link = ""
 
-    # लिंक मोड रिकवरी (स्क्रीनशॉट के अनुसार टेक्स्ट लिस्ट)
     if settings['links']:
         files_link = get_file_list_string(files, message.chat.id)
     
-    # बटन मोड (अगर लिंक मोड ऑफ है)
     if not settings['links']:
         for file in files:
             if is_prm:
@@ -69,18 +65,14 @@ async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=Fals
                 f_link = await get_shortlink(settings['url'], settings['api'], f"https://t.me/{temp.U_NAME}?start=file_{message.chat.id}_{file['_id']}")
                 btn.append([InlineKeyboardButton(f"⚡ [{get_size(file['file_size'])}] {file['file_name']}", url=f_link)])
 
-    # पेजिनेशन बटन (Next/Back)
     pagination_row = []
     if offset != 0:
         pagination_row.append(InlineKeyboardButton("« ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{int(offset)-MAX_BTN}"))
-    
     pagination_row.append(InlineKeyboardButton(f"{math.ceil(int(offset) / MAX_BTN) + 1}/{math.ceil(int(total) / MAX_BTN)}", callback_data="pages"))
-    
     if n_offset != "":
         pagination_row.append(InlineKeyboardButton("ɴᴇxᴛ »", callback_data=f"next_{req}_{key}_{n_offset}"))
     
     btn.append(pagination_row)
-    
     btn.insert(0, [
         InlineKeyboardButton("🌐 ʟᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}#{req}#{offset}"),
         InlineKeyboardButton("🔍 ǫᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}#{req}#{offset}")
@@ -122,7 +114,19 @@ async def next_page_handler(bot, query: CallbackQuery):
     await auto_filter(bot, query.message.reply_to_message, query.message, search, offset=offset, is_edit=True)
     await query.answer()
 
-# --- एडमिन के लिए PM सर्च कंट्रोल (यह वापस जोड़ दिया गया है) ---
+# --- सुधारा हुआ suggest_spelling फंक्शन ---
+async def suggest_spelling(message, reply_msg, search):
+    btn = [[
+        InlineKeyboardButton("🔎 Search Google", url=f"https://www.google.com/search?q={search.replace(' ', '+')}")
+    ],[
+        InlineKeyboardButton("🚫 Close", callback_data="close_data")
+    ]]
+    await reply_msg.edit(
+        f"👋 Hello {message.from_user.mention if message.from_user else 'User'},\n\nमुझे डेटाबेस में <b>'{search}'</b> नहीं मिला।",
+        reply_markup=InlineKeyboardMarkup(btn)
+    )
+
+# --- एडमिन कमांड्स ---
 @Client.on_message(filters.command('set_pm_search') & filters.user(ADMINS))
 async def set_pm_search_config(client, message):
     choice = message.command[1].lower() if len(message.command) > 1 else ""
