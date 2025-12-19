@@ -6,6 +6,7 @@ from hydrogram.errors import FloodWait
 from info import ADMINS, INDEX_EXTENSIONS
 from database.ia_filterdb import save_file
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+# temp को यहाँ utils से सही तरीके से इम्पोर्ट किया गया है
 from utils import temp, get_readable_time
 
 # एक समय में एक ही इंडेक्सिंग सुनिश्चित करने के लिए
@@ -20,7 +21,7 @@ async def index_start_cmd(bot, message):
     prompt = await message.reply("अंतिम मैसेज फॉरवर्ड करें या उस चैनल के अंतिम मैसेज का लिंक भेजें जहाँ से इंडेक्सिंग शुरू करनी है।")
     
     try:
-        # यूजर के रिप्लाई का इंतज़ार करें (bot.listen का उपयोग)
+        # यूजर के रिप्लाई का इंतज़ार करें
         msg = await bot.listen(chat_id=message.chat.id, user_id=message.from_user.id, timeout=300)
     except:
         return await prompt.edit("समय समाप्त! फिर से /index कमांड चलाएं।")
@@ -51,7 +52,6 @@ async def index_start_cmd(bot, message):
     if chat.type != enums.ChatType.CHANNEL:
         return await message.reply("मैं केवल चैनलों को इंडेक्स कर सकता हूँ।")
 
-    # कितने मैसेज छोड़ने (Skip) हैं
     s_prompt = await message.reply("कितने मैसेज स्किप करने हैं? (संख्या भेजें, जैसे: 0)")
     try:
         skip_msg = await bot.listen(chat_id=message.chat.id, user_id=message.from_user.id, timeout=120)
@@ -61,7 +61,6 @@ async def index_start_cmd(bot, message):
 
     await s_prompt.delete()
 
-    # पुष्टि के लिए बटन
     buttons = [[
         InlineKeyboardButton('हाँ, शुरू करें', callback_data=f'idx#yes#{chat_id}#{last_msg_id}#{skip}')
     ],[
@@ -74,7 +73,6 @@ async def index_start_cmd(bot, message):
 
 @Client.on_callback_query(filters.regex(r'^idx'))
 async def index_callback_handler(bot, query):
-    """इंडेक्सिंग शुरू या रद्द करने का कॉल-बैक"""
     data = query.data.split("#")
     ident = data[1]
 
@@ -85,8 +83,6 @@ async def index_callback_handler(bot, query):
         
         msg = query.message
         await msg.edit("इंडेक्सिंग शुरू हो रही है... 🚀")
-        
-        # मुख्य इंडेक्सिंग फंक्शन को कॉल करें
         await run_indexing(int(last_msg_id), chat_id, msg, bot, skip)
     
     elif ident == 'cancel':
@@ -94,7 +90,6 @@ async def index_callback_handler(bot, query):
         await query.answer("इंडेक्सिंग रोकने का प्रयास किया जा रहा है...", show_alert=True)
 
 async def run_indexing(lst_msg_id, chat, msg, bot, skip):
-    """डेटाबेस में फाइलें सेव करने का मुख्य लॉजिक"""
     start_time = time.time()
     total_files = 0
     duplicate = 0
@@ -103,13 +98,13 @@ async def run_indexing(lst_msg_id, chat, msg, bot, skip):
     
     async with lock:
         try:
+            # यहाँ bot (Client) का सही इस्तेमाल हो रहा है
             async for message in bot.iter_messages(chat, lst_msg_id, skip):
                 if temp.CANCEL:
                     temp.CANCEL = False
                     break
                 
                 current += 1
-                # हर 30 मैसेज के बाद स्टेटस अपडेट करें
                 if current % 30 == 0:
                     btn = [[InlineKeyboardButton('रद्द करें (STOP)', callback_data=f'idx#cancel#0#0#0')]]
                     try:
@@ -120,17 +115,14 @@ async def run_indexing(lst_msg_id, chat, msg, bot, skip):
                     except FloodWait as e:
                         await asyncio.sleep(e.value)
 
-                # मीडिया चेक (केवल वीडियो और डॉक्यूमेंट)
                 if message.empty or not message.media: continue
                 if message.media not in [enums.MessageMediaType.VIDEO, enums.MessageMediaType.DOCUMENT]: continue
                 
                 media = getattr(message, message.media.value, None)
                 if not media: continue
                 
-                # एक्सटेंशन चेक (mp4, mkv आदि)
                 if not (str(media.file_name).lower()).endswith(tuple(INDEX_EXTENSIONS)): continue
                 
-                # डेटाबेस में सेव करें
                 media.caption = message.caption
                 sts = await save_file(media)
                 if sts == 'suc': total_files += 1
@@ -143,3 +135,4 @@ async def run_indexing(lst_msg_id, chat, msg, bot, skip):
         finally:
             time_taken = get_readable_time(time.time()-start_time)
             await msg.edit(f'<b>इंडेक्सिंग पूरी हुई! ✅</b>\n\nकुल सेव: <code>{total_files}</code>\nडुप्लीकेट: <code>{duplicate}</code>\nसमय लगा: {time_taken}')
+
