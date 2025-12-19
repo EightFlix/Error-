@@ -6,13 +6,11 @@ from hydrogram import Client, filters
 from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from hydrogram.errors import ListenerTimeout
 
-# temp को यहाँ से हटा दिया गया है
 from info import (
     ADMINS, IS_PREMIUM, PRE_DAY_AMOUNT, UPI_ID, UPI_NAME, 
     RECEIPT_SEND_USERNAME, script
 )
 from database.users_chats_db import db
-# temp को यहाँ utils से इम्पोर्ट किया गया है
 from utils import is_premium, get_readable_time, temp
 
 # --- Commands ---
@@ -22,6 +20,10 @@ async def plan_cmd(client, message):
     if not IS_PREMIUM:
         return await message.reply('प्रीमियम फीचर अभी एडमिन द्वारा बंद किया गया है।')
     
+    # एडमिन को प्लान दिखाने के बजाय सीधा मैसेज
+    if message.from_user.id in ADMINS:
+        return await message.reply("👑 **आप बॉट ओनर हैं!**\nआपके पास पहले से ही अनलिमिटेड प्रीमियम एक्सेस है।")
+
     btn = [[
         InlineKeyboardButton('Activate Trial (1h)', callback_data='activate_trial')
     ],[
@@ -37,7 +39,12 @@ async def myplan_cmd(client, message):
     if not IS_PREMIUM:
         return await message.reply('प्रीमियम फीचर डिसेबल है।')
     
-    if not await is_premium(message.from_user.id, client):
+    user_id = message.from_user.id
+    # एडमिन के लिए विशेष रिस्पॉन्स
+    if user_id in ADMINS:
+        return await message.reply("👑 **आप बॉट ओनर हैं!**\nप्लान: `Lifetime Premium` \nसमाप्ति तिथि: `Never`")
+    
+    if not await is_premium(user_id, client):
         btn = [[
             InlineKeyboardButton('Activate Trial', callback_data='activate_trial'),
             InlineKeyboardButton('Activate Plan', callback_data='activate_plan')
@@ -47,9 +54,16 @@ async def myplan_cmd(client, message):
             reply_markup=InlineKeyboardMarkup(btn)
         )
     
-    mp = db.get_plan(message.from_user.id)
-    expiry = mp['expire'].strftime('%Y.%m.%d %H:%M:%S')
-    await message.reply(f"आपका सक्रिय प्लान: {mp['plan']}\nसमाप्ति तिथि: {expiry}")
+    mp = db.get_plan(user_id)
+    expiry_date = mp.get('expire')
+    
+    # strftime एरर फिक्स: चेक करें कि डेटा स्ट्रिंग है या datetime object
+    if isinstance(expiry_date, datetime):
+        expiry = expiry_date.strftime('%Y.%m.%d %H:%M:%S')
+    else:
+        expiry = str(expiry_date) if expiry_date else "असीमित"
+
+    await message.reply(f"आपका सक्रिय प्लान: {mp.get('plan', 'Premium')}\nसमाप्ति तिथि: {expiry}")
 
 @Client.on_message(filters.command('add_prm') & filters.user(ADMINS))
 async def add_premium_admin(bot, message):
@@ -59,7 +73,7 @@ async def add_premium_admin(bot, message):
         duration = args[2]
         days = int(duration[:-1]) 
     except:
-        return await message.reply('उपयोग: /add_prm user_id 7d')
+        return await message.reply('उपयोग: `/add_prm user_id 7d`')
 
     try:
         user = await bot.get_users(user_id)
@@ -81,7 +95,7 @@ async def remove_premium_admin(bot, message):
     try:
         user_id = int(message.text.split(' ')[1])
     except:
-        return await message.reply('उपयोग: /rm_prm user_id')
+        return await message.reply('उपयोग: `/rm_prm user_id`')
 
     mp = db.get_plan(user_id)
     mp.update({'expire': '', 'plan': '', 'premium': False})
@@ -149,4 +163,3 @@ async def plan_activation_callback(bot, query: CallbackQuery):
             await receipt.reply('कृपया फोटो भेजें। सहायता के लिए एडमिन से संपर्क करें।')
     except ListenerTimeout:
         await query.message.reply('भुगतान रसीद भेजने का समय समाप्त हो गया।')
-
