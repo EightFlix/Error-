@@ -1,13 +1,12 @@
 from hydrogram.errors import UserNotParticipant, FloodWait
-from info import LONG_IMDB_DESCRIPTION, ADMINS, IS_PREMIUM, TIME_ZONE
-import asyncio
+from info import LONG_IMDB_DESCRIPTION, ADMINS, IS_PREMIUM, TIME_ZONE, SHORTLINK_API, SHORTLINK_URL
+import asyncio, requests, pytz, re, qrcode
+from io import BytesIO
 from hydrogram.types import InlineKeyboardButton
 from hydrogram import enums
-import re
 from datetime import datetime
 from database.users_chats_db import db
 from shortzy import Shortzy
-import requests, pytz
 
 class temp(object):
     START_TIME = 0
@@ -25,7 +24,20 @@ class temp(object):
     BOT = None
     PREMIUM = {}
 
-# --- Verification & Subscriber Status (Fixed) ---
+# --- QR कोड जनरेशन फंक्शन ---
+async def generate_qr_code(data):
+    """पेमेंट के लिए QR कोड जनरेट करने का फंक्शन"""
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = BytesIO()
+    bio.name = 'qr.png'
+    img.save(bio, 'PNG')
+    bio.seek(0)
+    return bio
+
+# --- Verification & Subscriber Status ---
 
 async def is_subscribed(bot, query):
     btn = []
@@ -44,7 +56,6 @@ async def is_subscribed(bot, query):
     return btn
 
 async def get_verify_status(user_id):
-    """ inline.py के लिए यह फंक्शन ज़रूरी है """
     verify = temp.VERIFICATIONS.get(user_id)
     if not verify:
         verify = await db.get_verify_status(user_id)
@@ -62,15 +73,16 @@ async def update_verify_status(user_id, verify_token="", is_verified=False, link
     temp.VERIFICATIONS[user_id] = current
     await db.update_verify_status(user_id, current)
 
-# --- Premium Status & Check ---
+# --- Premium Status & Auto-Check ---
 
 async def is_premium(user_id, bot):
     if not IS_PREMIUM or user_id in ADMINS:
         return True
     mp = db.get_plan(user_id)
-    if mp['premium']:
+    if mp.get('premium'):
         if mp['expire'] < datetime.now():
-            await bot.send_message(user_id, "Your premium plan is expired.")
+            try: await bot.send_message(user_id, "Your premium plan is expired.")
+            except: pass
             mp.update({'expire': '', 'plan': '', 'premium': False})
             db.update_plan(user_id, mp)
             return False
@@ -78,20 +90,19 @@ async def is_premium(user_id, bot):
     return False
 
 async def check_premium(bot):
-    """ प्रीमियम एक्सपायरी ऑटो-चेक करने के लिए """
+    """ प्रीमियम एक्सपायरी ऑटो-चेक """
     while True:
         pr = [i for i in db.get_premium_users() if i['status']['premium']]
         for p in pr:
             mp = p['status']
             if mp['expire'] < datetime.now():
-                try:
-                    await bot.send_message(p['id'], "Your premium plan has expired.")
+                try: await bot.send_message(p['id'], "Your premium plan has expired.")
                 except: pass
                 mp.update({'expire': '', 'plan': '', 'premium': False})
                 db.update_plan(p['id'], mp)
         await asyncio.sleep(1200)
 
-# --- Broadcast Features ---
+# --- Broadcast Features (बहाल किया गया) ---
 
 async def broadcast_messages(user_id, message, pin):
     try:
@@ -119,11 +130,10 @@ async def groups_broadcast_messages(chat_id, message, pin):
         await db.delete_chat(chat_id)
         return "Error"
 
-# --- Utility Functions (IMDb Disabled for Speed) ---
+# --- Utility Functions ---
 
 async def get_poster(query, bulk=False, id=False, file=None):
-    """ स्पीड के लिए IMDb यहाँ से हटा दिया गया है """
-    return None
+    return None # स्पीड के लिए IMDb बंद
 
 def get_size(size):
     units = ["Bytes", "KB", "MB", "GB", "TB"]
@@ -161,6 +171,7 @@ def get_wish():
     return "ɢᴏᴏᴅ ᴇᴠᴇɴɪɴɢ 🌘"
 
 async def get_seconds(time_string):
+    """ समय को सेकंड में बदलने के लिए (बहाल किया गया) """
     def extract_value_and_unit(ts):
         value = "".join(filter(str.isdigit, ts))
         unit = "".join(filter(str.isalpha, ts))
@@ -168,3 +179,4 @@ async def get_seconds(time_string):
     value, unit = extract_value_and_unit(time_string)
     multipliers = {'s': 1, 'min': 60, 'hour': 3600, 'day': 86400, 'month': 2592000, 'year': 31536000}
     return value * multipliers.get(unit, 0)
+
