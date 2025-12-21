@@ -6,12 +6,11 @@ from hydrogram.types import (
     Message,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    CallbackQuery
 )
 
 from utils import temp
 from database.users_chats_db import db
-from info import ADMINS, SUPPORT_LINK, LOG_CHANNEL
+from info import ADMINS, SUPPORT_LINK
 
 # ======================================================
 # ⚙️ CONFIG
@@ -30,6 +29,8 @@ USER_MSG_CACHE = {}  # user_id -> [timestamps]
 def parse_time(text: str):
     text = text.lower()
     num = int("".join(filter(str.isdigit, text)) or 0)
+    if num <= 0:
+        return None
     if "m" in text:
         return timedelta(minutes=num)
     if "h" in text:
@@ -55,31 +56,26 @@ def admin_panel(uid: int):
     ])
 
 # ======================================================
-# 🔒 FILTERS
+# 🚫 PRIVATE – BANNED USER
 # ======================================================
 
-async def banned_user(_, __, m: Message):
-    return m.from_user and m.from_user.id in temp.BANNED_USERS
+@Client.on_message(filters.private)
+async def banned_pm(bot, message: Message):
+    uid = message.from_user.id
+    ban = await db.get_ban_status(uid)
 
-banned_filter = filters.create(banned_user)
+    if not ban.get("status"):
+        return
 
-# ======================================================
-# 🚫 PRIVATE BANNED USER
-# ======================================================
-
-@Client.on_message(filters.private & banned_filter)
-async def banned_pm(bot, message):
-    ban = await db.get_ban_status(message.from_user.id)
     exp = ban.get("expire_at")
-
     if exp and exp < datetime.utcnow():
-        await db.unban_user(message.from_user.id)
-        temp.BANNED_USERS.remove(message.from_user.id)
+        await db.unban_user(uid)
+        temp.BANNED_USERS.discard(uid)
         return await message.reply("✅ You are unbanned.")
 
     txt = (
         "🚫 <b>You are restricted</b>\n\n"
-        f"<b>Reason:</b> <code>{ban.get('ban_reason','N/A')}</code>\n"
+        f"<b>Reason:</b> <code>{ban.get('reason','N/A')}</code>\n"
     )
     if exp:
         txt += f"<b>Expires:</b> {exp.strftime('%d %b %Y, %I:%M %p')}"
@@ -92,7 +88,7 @@ async def banned_pm(bot, message):
     )
 
 # ======================================================
-# 👮 GROUP READ-ONLY (SOFTBAN / MUTE)
+# 👮 GROUP GUARD (FLOOD + BAN)
 # ======================================================
 
 @Client.on_message(filters.group & filters.incoming)
@@ -102,7 +98,7 @@ async def moderation_guard(bot, message: Message):
 
     uid = message.from_user.id
 
-    # --- flood detection ---
+    # ---- Flood detection ----
     now = datetime.utcnow().timestamp()
     USER_MSG_CACHE.setdefault(uid, [])
     USER_MSG_CACHE[uid].append(now)
@@ -112,7 +108,7 @@ async def moderation_guard(bot, message: Message):
         await auto_warn(bot, message, "Flood detected")
         return await message.delete()
 
-    # --- banned / muted ---
+    # ---- Banned ----
     if uid in temp.BANNED_USERS:
         return await message.delete()
 
@@ -120,7 +116,7 @@ async def moderation_guard(bot, message: Message):
 # ⚠️ WARN SYSTEM
 # ======================================================
 
-async def auto_warn(bot, message, reason="Rule violation"):
+async def auto_warn(bot, message: Message, reason="Rule violation"):
     uid = message.from_user.id
     warns = await db.add_warn(uid)
 
@@ -137,6 +133,7 @@ async def auto_warn(bot, message, reason="Rule violation"):
             f"⚠️ Warning {warns}/{WARN_LIMIT}\nReason: {reason}",
             reply_markup=admin_panel(uid)
         )
+
 
 @Client.on_message(filters.command("warn") & filters.group & filters.user(ADMINS))
 async def warn_cmd(bot, message):
@@ -157,19 +154,23 @@ async def mute_user(bot, chat_id, uid, duration):
     )
     await db.log_action("mute", uid)
 
+
 @Client.on_message(filters.command("mute") & filters.group & filters.user(ADMINS))
 async def mute_cmd(bot, message):
-    if not message.reply_to_message:
-        return
+    if not message.reply_to_message or len(message.command) < 2:
+        return await message.reply("Usage: /mute 10m | 1h | 1d")
+
     duration = parse_time(message.command[1])
     if not duration:
-        return await message.reply("Usage: /mute 10m | 1h | 1d")
+        return await message.reply("Invalid time format")
+
     await mute_user(
         bot,
         message.chat.id,
         message.reply_to_message.from_user.id,
         duration
     )
+
 
 @Client.on_message(filters.command("unmute") & filters.group & filters.user(ADMINS))
 async def unmute_cmd(bot, message):
@@ -182,32 +183,42 @@ async def unmute_cmd(bot, message):
     )
 
 # ======================================================
-# 🔒 SOFTBAN / TEMPBAN
+# 🔒 SOFTBAN / TEMPBAN / UNBAN
 # ======================================================
 
 @Client.on_message(filters.command("softban") & filters.user(ADMINS))
 async def softban(bot, message):
+    if not message.reply_to_message:
+        return
     uid = message.reply_to_message.from_user.id
     await db.ban_user(uid, "SoftBan", None)
-    temp.BANNED_USERS.append(uid)
+    temp.BANNED_USERS.add(uid)
+
 
 @Client.on_message(filters.command("tempban") & filters.user(ADMINS))
 async def tempban(bot, message):
-    uid = message.reply_to_message.from_user.id
+    if not message.reply_to_message or len(message.command) < 2:
+        return
     duration = parse_time(message.command[1])
+    if not duration:
+        return
+
+    uid = message.reply_to_message.from_user.id
     expire = datetime.utcnow() + duration
     await db.ban_user(uid, "TempBan", expire)
-    temp.BANNED_USERS.append(uid)
+    temp.BANNED_USERS.add(uid)
+
 
 @Client.on_message(filters.command("unban") & filters.user(ADMINS))
 async def unban(bot, message):
+    if len(message.command) < 2:
+        return
     uid = int(message.command[1])
     await db.unban_user(uid)
-    if uid in temp.BANNED_USERS:
-        temp.BANNED_USERS.remove(uid)
+    temp.BANNED_USERS.discard(uid)
 
 # ======================================================
-# 🔁 AUTO-UNBAN WORKER
+# 🔁 AUTO-UNBAN WORKER (CALLED FROM bot.py)
 # ======================================================
 
 async def auto_unban_worker(bot):
@@ -217,14 +228,9 @@ async def auto_unban_worker(bot):
             if exp and exp < datetime.utcnow():
                 uid = u["id"]
                 await db.unban_user(uid)
-                if uid in temp.BANNED_USERS:
-                    temp.BANNED_USERS.remove(uid)
+                temp.BANNED_USERS.discard(uid)
                 try:
-                    await bot.send_message(uid, "✅ Temp-ban expired.")
+                    await bot.send_message(uid, "✅ Your temp-ban has expired.")
                 except:
                     pass
         await asyncio.sleep(300)
-
-@Client.on_start()
-async def start_workers(bot):
-    asyncio.create_task(auto_unban_worker(bot))
