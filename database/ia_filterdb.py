@@ -28,7 +28,7 @@ db = client[DATABASE_NAME]
 collection = db[COLLECTION_NAME]
 
 # =====================================================
-# 🚀 DB INDEX TUNING (FAST SEARCH)
+# 🚀 DB INDEX TUNING (SAFE + FAST)
 # =====================================================
 def ensure_indexes(col):
     try:
@@ -36,10 +36,14 @@ def ensure_indexes(col):
             [("file_name", TEXT), ("caption", TEXT)],
             name="file_text_index"
         )
-        col.create_index([("quality", ASCENDING)], name="quality_idx")
-        col.create_index([("updated_at", ASCENDING)], name="updated_at_idx")
     except OperationFailure as e:
         logger.warning(f"Index warning: {e}")
+
+    try:
+        col.create_index("quality", name="quality_idx")
+        col.create_index("updated_at", name="updated_at_idx")
+    except OperationFailure:
+        pass
 
 ensure_indexes(collection)
 
@@ -53,7 +57,7 @@ def db_count_documents():
 # ⚡ SEARCH CACHE
 # =====================================================
 SEARCH_CACHE = {}
-CACHE_TTL = 60  # seconds
+CACHE_TTL = 60
 
 def cache_get(key):
     v = SEARCH_CACHE.get(key)
@@ -69,7 +73,7 @@ def cache_set(key, value):
     SEARCH_CACHE[key] = (value, time.time())
 
 # =====================================================
-# 🧠 AUTO QUALITY DETECT
+# 🧠 QUALITY DETECTOR
 # =====================================================
 def detect_quality(name: str) -> str:
     n = name.lower()
@@ -84,14 +88,14 @@ def detect_quality(name: str) -> str:
     return "unknown"
 
 # =====================================================
-# 🧠 ML-LESS FUZZY BOOST
+# 🔍 FUZZY FIX
 # =====================================================
 def fuzzy_fix(query, choices):
     match = get_close_matches(query, choices, n=1, cutoff=0.7)
     return match[0] if match else None
 
 # =====================================================
-# 🔍 SEARCH ENGINE
+# 🔎 SEARCH ENGINE
 # =====================================================
 async def get_search_results(query, offset=0, max_results=MAX_BTN):
     q = query.strip().lower()
@@ -106,19 +110,20 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN):
     files = []
     total = 0
 
-    # ---------- TEXT SEARCH ----------
-    text_filter = {"$text": {"$search": q}}
-    projection = {
-        "file_name": 1,
-        "file_size": 1,
-        "caption": 1,
-        "quality": 1,
-        "score": {"$meta": "textScore"},
-    }
-
+    # TEXT SEARCH
     try:
+        text_filter = {"$text": {"$search": q}}
         cursor = (
-            collection.find(text_filter, projection)
+            collection.find(
+                text_filter,
+                {
+                    "file_name": 1,
+                    "file_size": 1,
+                    "caption": 1,
+                    "quality": 1,
+                    "score": {"$meta": "textScore"},
+                }
+            )
             .sort([("score", {"$meta": "textScore"})])
             .skip(offset)
             .limit(max_results)
@@ -127,9 +132,8 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN):
         total = collection.count_documents(text_filter)
     except Exception as e:
         logger.error(f"Text search error: {e}")
-        files = []
 
-    # ---------- REGEX FALLBACK ----------
+    # REGEX FALLBACK
     if not files:
         regex = re.compile(re.escape(q), re.IGNORECASE)
         rg_filter = (
@@ -141,14 +145,14 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN):
         files = list(cursor)
         total = collection.count_documents(rg_filter)
 
-    # ---------- FUZZY RETRY ----------
+    # FUZZY RETRY
     if not files:
         try:
             names = collection.distinct("file_name")
             fix = fuzzy_fix(q, names)
             if fix and fix != q:
                 return await get_search_results(fix, offset, max_results)
-        except Exception:
+        except:
             pass
 
     next_offset = offset + max_results if total > offset + max_results else ""
@@ -157,7 +161,7 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN):
     return result
 
 # =====================================================
-# 🗑 DELETE FILES (ADMIN SAFE)
+# 🗑 DELETE FILES
 # =====================================================
 async def delete_files(query):
     regex = re.compile(re.escape(query), re.IGNORECASE)
@@ -207,6 +211,37 @@ async def save_file(media):
     except Exception as e:
         logger.error(f"Save file error: {e}")
         return "err"
+
+# =====================================================
+# 🔄 CHANNEL UPDATE HELPERS (🔥 FIXED)
+# =====================================================
+async def update_file_caption(file_id, new_caption: str):
+    if not new_caption:
+        return False
+
+    new_caption = re.sub(r"@\w+|[_\-.+]", " ", new_caption).strip()
+
+    res = collection.update_one(
+        {"_id": file_id},
+        {"$set": {
+            "caption": new_caption,
+            "updated_at": datetime.utcnow()
+        }}
+    )
+    return res.modified_count > 0
+
+
+async def update_file_quality(file_id, new_name: str):
+    quality = detect_quality(new_name)
+
+    res = collection.update_one(
+        {"_id": file_id},
+        {"$set": {
+            "quality": quality,
+            "updated_at": datetime.utcnow()
+        }}
+    )
+    return res.modified_count > 0
 
 # =====================================================
 # 🔐 FILE ID UTILS
