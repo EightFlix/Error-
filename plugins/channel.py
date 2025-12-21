@@ -1,112 +1,91 @@
 from hydrogram import Client, filters, enums
-from info import INDEX_CHANNELS
+from info import INDEX_CHANNELS, LOG_CHANNEL
 from database.ia_filterdb import (
     save_file,
-    get_file_details,
     update_file_caption,
-    update_file_quality
+    detect_quality
 )
 
-# ======================================================
-# 🎥 VIDEO QUALITY DETECTOR (sync with index.py)
-# ======================================================
-def detect_video_quality(text: str) -> str:
-    if not text:
-        return "unknown"
-    t = text.lower()
-    if "2160" in t or "4k" in t:
-        return "2160p"
-    if "1080" in t:
-        return "1080p"
-    if "720" in t:
-        return "720p"
-    if "480" in t:
-        return "480p"
-    return "unknown"
+# ─────────────────────────────────────────────
+# MEDIA FILTER (VIDEO + DOCUMENT ONLY)
+# ─────────────────────────────────────────────
+media_filter = filters.video | filters.document
 
-# ======================================================
-# 📥 CHANNEL AUTO INDEX HANDLER
-# ======================================================
-@Client.on_message(filters.chat(INDEX_CHANNELS))
-async def channel_media_handler(bot, message):
-    if message.empty or not message.media:
+
+# ─────────────────────────────────────────────
+# 📥 NEW FILE INDEX
+# ─────────────────────────────────────────────
+@Client.on_message(filters.chat(INDEX_CHANNELS) & media_filter)
+async def index_new_file(bot, message):
+    media = getattr(message, message.media.value, None)
+    if not media or not media.file_name:
         return
 
-    # ================= VIDEO =================
-    if message.media == enums.MessageMediaType.VIDEO:
-        media = message.video
-        src_text = f"{media.file_name or ''} {message.caption or ''}"
-        media.quality = detect_video_quality(src_text)
+    media.caption = message.caption or ""
 
-    # ================= DOCUMENT (PDF / PHP) =================
-    elif message.media == enums.MessageMediaType.DOCUMENT:
-        media = message.document
-        if not media or not media.file_name:
-            return
+    # 🧠 auto quality detect
+    quality = detect_quality(media.file_name, media.caption)
 
-        name = media.file_name.lower()
-        if not (name.endswith(".pdf") or name.endswith(".php")):
-            return
+    status = await save_file(media, quality=quality)
 
-    # ================= BLOCK EVERYTHING ELSE =================
+    # ───── Emoji feedback in channel ─────
+    if status == "suc":
+        emoji = "✅"        # indexed
+    elif status == "dup":
+        emoji = "♻️"        # duplicate
     else:
-        return
+        emoji = "❌"
 
-    media.caption = message.caption
-    status = await save_file(media)
-
-    # ================= EMOJI FEEDBACK =================
     try:
-        if status == "suc":
-            await message.react("✅")
-        elif status == "dup":
-            await message.react("♻️")
+        await message.react(emoji)
     except:
         pass
 
-# ======================================================
-# ✏️ CAPTION EDIT HANDLER (QUALITY RE-DETECT)
-# ======================================================
-@Client.on_edited_message(filters.chat(INDEX_CHANNELS))
-async def channel_caption_edit_handler(bot, message):
-    if not message.media or not message.caption:
+    # ───── LOG ─────
+    if LOG_CHANNEL:
+        await bot.send_message(
+            LOG_CHANNEL,
+            f"📥 **Index Event**\n"
+            f"📄 `{media.file_name}`\n"
+            f"🎞 Quality: `{quality}`\n"
+            f"📊 Status: `{status}`"
+        )
+
+
+# ─────────────────────────────────────────────
+# ✏️ CAPTION EDIT → DB AUTO UPDATE
+# ─────────────────────────────────────────────
+@Client.on_edited_message(filters.chat(INDEX_CHANNELS) & media_filter)
+async def update_caption(bot, message):
+    media = getattr(message, message.media.value, None)
+    if not media or not media.file_name:
         return
 
-    # ================= MEDIA TYPE =================
-    if message.media == enums.MessageMediaType.VIDEO:
-        media = message.video
-        src_text = f"{media.file_name or ''} {message.caption}"
-        new_quality = detect_video_quality(src_text)
+    new_caption = message.caption or ""
 
-    elif message.media == enums.MessageMediaType.DOCUMENT:
-        media = message.document
-        if not media or not media.file_name:
-            return
+    # 🧠 re-detect quality on caption edit
+    quality = detect_quality(media.file_name, new_caption)
 
-        name = media.file_name.lower()
-        if not (name.endswith(".pdf") or name.endswith(".php")):
-            return
+    updated = await update_file_caption(
+        media.file_id,
+        new_caption,
+        quality
+    )
 
-        new_quality = None  # documents don't need quality
-
-    else:
+    if not updated:
         return
 
-    file_id = media.file_id
-
-    # ================= CHECK EXISTENCE =================
-    file = await get_file_details(file_id)
-    if not file:
-        return
-
-    # ================= UPDATE DB =================
-    await update_file_caption(file_id, message.caption)
-
-    if new_quality:
-        await update_file_quality(file_id, new_quality)
-
-    # ================= EMOJI FEEDBACK =================
+    # ───── Emoji feedback ─────
     try:
-        await message.react("✏️")
+        await message.react("✏️")   # caption updated
     except:
         pass
+
+    # ───── LOG ─────
+    if LOG_CHANNEL:
+        await bot.send_message(
+            LOG_CHANNEL,
+            f"✏️ **Caption Updated**\n"
+            f"📄 `{media.file_name}`\n"
+            f"🎞 New Quality: `{quality}`"
+        )
