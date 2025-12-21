@@ -12,68 +12,157 @@ from database.users_chats_db import db
 from database.ia_filterdb import db_count_documents, delete_files
 from utils import get_size, get_readable_time, temp
 
-
 # ======================================================
-# 🧠 ADMIN PANEL
-# ======================================================
-
-@Client.on_message(filters.command("admin") & filters.user(ADMINS))
-async def admin_panel(bot, message):
-    btn = [
-        [
-            InlineKeyboardButton("📊 Stats", callback_data="ap_stats"),
-            InlineKeyboardButton("🩺 Premium Health", callback_data="ap_health")
-        ],
-        [
-            InlineKeyboardButton("📢 Broadcast", callback_data="ap_broadcast"),
-            InlineKeyboardButton("🗑 Delete Files", callback_data="ap_delete")
-        ],
-        [
-            InlineKeyboardButton("🔄 Restart Bot", callback_data="ap_restart"),
-            InlineKeyboardButton("❌ Close", callback_data="close_data")
-        ]
-    ]
-
-    await message.reply(
-        "👮 **Admin Control Panel**\n\nSelect an action 👇",
-        reply_markup=InlineKeyboardMarkup(btn)
-    )
-
-
-# ======================================================
-# 📊 SYSTEM STATS
+# 🧠 LIVE DASHBOARD CONFIG
 # ======================================================
 
-async def build_stats():
-    files = db_count_documents()
+DASH_REFRESH = 45  # seconds
+DASH_CACHE = {}   # admin_id -> (text, ts)
+
+# ======================================================
+# 📊 DASHBOARD BUILDER
+# ======================================================
+
+async def build_dashboard():
     users = await db.total_users_count()
     chats = await db.total_chat_count()
+    files = db_count_documents()
     premium = db.get_premium_count()
 
     used_files = get_size(await db.get_files_db_size())
     used_data = get_size(await db.get_data_db_size())
     uptime = get_readable_time(time.time() - temp.START_TIME)
 
-    return script.STATUS_TXT.format(
-        users,
-        premium,
-        chats,
-        files,
-        used_files,
-        used_data,
-        uptime
+    now = datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+    text = (
+        "📊 <b>LIVE ADMIN DASHBOARD</b>\n\n"
+        f"👤 <b>Users</b>        : <code>{users}</code>\n"
+        f"👥 <b>Groups</b>       : <code>{chats}</code>\n"
+        f"📦 <b>Indexed Files</b>: <code>{files}</code>\n"
+        f"💎 <b>Premium Users</b>: <code>{premium}</code>\n\n"
+        f"🗂 <b>Files DB Size</b>: <code>{used_files}</code>\n"
+        f"🗃 <b>Data DB Size</b> : <code>{used_data}</code>\n\n"
+        f"⏱ <b>Uptime</b>       : <code>{uptime}</code>\n"
+        f"🔄 <b>Updated</b>      : <code>{now}</code>"
+    )
+    return text
+
+
+def dashboard_buttons():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="dash_refresh"),
+                InlineKeyboardButton("🩺 Health", callback_data="dash_health")
+            ],
+            [
+                InlineKeyboardButton("📢 Broadcast", callback_data="dash_broadcast"),
+                InlineKeyboardButton("🗑 Delete", callback_data="dash_delete")
+            ],
+            [
+                InlineKeyboardButton("🔄 Restart", callback_data="dash_restart"),
+                InlineKeyboardButton("❌ Close", callback_data="close_data")
+            ]
+        ]
     )
 
+# ======================================================
+# 🚀 OPEN DASHBOARD
+# ======================================================
+
+@Client.on_message(filters.command(["admin", "dashboard"]) & filters.user(ADMINS))
+async def open_dashboard(bot, message):
+    text = await build_dashboard()
+
+    msg = await message.reply(
+        text,
+        reply_markup=dashboard_buttons(),
+        disable_web_page_preview=True
+    )
+
+    DASH_CACHE[message.from_user.id] = (text, time.time())
 
 # ======================================================
-# 🩺 PREMIUM HEALTH CORE
+# 🔁 DASHBOARD CALLBACKS
+# ======================================================
+
+@Client.on_callback_query(filters.regex("^dash_"))
+async def dashboard_callbacks(bot, query: CallbackQuery):
+    if query.from_user.id not in ADMINS:
+        return await query.answer("Not allowed", show_alert=True)
+
+    action = query.data
+
+    # ---------- REFRESH ----------
+    if action == "dash_refresh":
+        cached = DASH_CACHE.get(query.from_user.id)
+        if cached and time.time() - cached[1] < DASH_REFRESH:
+            text = cached[0]
+        else:
+            text = await build_dashboard()
+            DASH_CACHE[query.from_user.id] = (text, time.time())
+
+        await query.message.edit(
+            text,
+            reply_markup=dashboard_buttons(),
+            disable_web_page_preview=True
+        )
+
+    # ---------- PREMIUM HEALTH ----------
+    elif action == "dash_health":
+        report = await run_premium_health(False)
+        await query.message.edit(report)
+
+        try:
+            await bot.send_message(LOG_CHANNEL, report)
+        except:
+            pass
+
+    # ---------- BROADCAST ----------
+    elif action == "dash_broadcast":
+        await query.message.edit(
+            "📢 <b>Broadcast</b>\n\n"
+            "Reply to any message and use:\n"
+            "<code>/broadcast</code>"
+        )
+
+    # ---------- DELETE ----------
+    elif action == "dash_delete":
+        await query.message.edit(
+            "🗑 <b>Delete Files</b>\n\n"
+            "Use command:\n"
+            "<code>/delete keyword</code>"
+        )
+
+    # ---------- RESTART ----------
+    elif action == "dash_restart":
+        await query.message.edit("🔄 Restarting bot...")
+
+        with open("restart.txt", "w") as f:
+            f.write(f"{query.message.chat.id}\n{query.message.id}")
+
+        try:
+            await bot.send_message(
+                LOG_CHANNEL,
+                f"♻️ <b>Bot Restarted</b>\nAdmin: {query.from_user.mention}"
+            )
+        except:
+            pass
+
+        os.execl(sys.executable, sys.executable, "bot.py")
+
+    await query.answer()
+
+# ======================================================
+# 🩺 PREMIUM HEALTH CORE (SHARED)
 # ======================================================
 
 async def run_premium_health(auto_fix=False):
     now = datetime.utcnow()
     users = db.get_premium_users()
 
-    total = expired_bug = fixed = missing_invoice = admin_skip = 0
+    total = expired = fixed = no_invoice = admin_skip = 0
 
     for u in users:
         uid = u["id"]
@@ -89,7 +178,7 @@ async def run_premium_health(auto_fix=False):
         total += 1
 
         if expire < now:
-            expired_bug += 1
+            expired += 1
             if auto_fix:
                 st.update({
                     "premium": False,
@@ -100,76 +189,19 @@ async def run_premium_health(auto_fix=False):
                 db.update_plan(uid, st)
                 fixed += 1
 
-        if not st.get("invoice"):
-            missing_invoice += 1
+        if not st.get("invoices"):
+            no_invoice += 1
 
-    report = (
-        "🩺 **Premium Health Report**\n\n"
-        f"👥 Active Premium Users : `{total}`\n"
-        f"❌ Expired but Active   : `{expired_bug}`\n"
-        f"🧾 Missing Invoices    : `{missing_invoice}`\n"
-        f"👑 Admin Skipped       : `{admin_skip}`\n\n"
-        f"🛠 Auto Fix            : `{'ON' if auto_fix else 'OFF'}`\n"
-        f"✅ Fixed               : `{fixed}`\n\n"
-        f"🕒 Checked At          : `{now.strftime('%d %b %Y, %I:%M %p')}`"
+    return (
+        "🩺 <b>PREMIUM HEALTH REPORT</b>\n\n"
+        f"👥 Active Premium : <code>{total}</code>\n"
+        f"❌ Expired Bug   : <code>{expired}</code>\n"
+        f"🧾 No Invoice    : <code>{no_invoice}</code>\n"
+        f"👑 Admin Skipped : <code>{admin_skip}</code>\n\n"
+        f"🛠 Auto Fix      : <code>{'ON' if auto_fix else 'OFF'}</code>\n"
+        f"✅ Fixed         : <code>{fixed}</code>\n\n"
+        f"🕒 Checked At    : <code>{now.strftime('%d %b %Y, %I:%M %p')}</code>"
     )
-    return report
-
-
-# ======================================================
-# ⏰ DAILY AUTO HEALTH
-# ======================================================
-
-async def daily_health_report(bot):
-    await asyncio.sleep(60)
-    while True:
-        try:
-            report = await run_premium_health(False)
-            await bot.send_message(
-                LOG_CHANNEL,
-                "📅 **Daily Premium Health Check**\n\n" + report
-            )
-        except:
-            pass
-        await asyncio.sleep(86400)
-
-
-# ======================================================
-# 🧲 CALLBACK HANDLER
-# ======================================================
-
-@Client.on_callback_query(filters.regex("^ap_"))
-async def admin_callbacks(bot, query: CallbackQuery):
-    if query.from_user.id not in ADMINS:
-        return await query.answer("Not allowed", show_alert=True)
-
-    data = query.data
-
-    if data == "ap_stats":
-        text = await build_stats()
-        await query.message.edit(text)
-
-    elif data == "ap_health":
-        report = await run_premium_health(False)
-        await query.message.edit(report)
-        await bot.send_message(LOG_CHANNEL, report)
-
-    elif data == "ap_delete":
-        await query.message.edit(
-            "🗑 **Delete Files**\n\nUse command:\n`/delete keyword`"
-        )
-
-    elif data == "ap_restart":
-        await query.message.edit("🔄 Restarting bot...")
-        with open("restart.txt", "w") as f:
-            f.write(f"{query.message.chat.id}\n{query.message.id}")
-
-        await bot.send_message(
-            LOG_CHANNEL,
-            f"♻️ **Bot Restarted**\nAdmin: {query.from_user.mention}"
-        )
-        os.execl(sys.executable, sys.executable, "bot.py")
-
 
 # ======================================================
 # 🗑 SAFE DELETE
@@ -178,36 +210,33 @@ async def admin_callbacks(bot, query: CallbackQuery):
 @Client.on_message(filters.command("delete") & filters.user(ADMINS))
 async def delete_cmd(bot, message):
     if len(message.command) < 2:
-        return await message.reply("⚠️ `/delete keyword`")
+        return await message.reply("⚠️ Usage: <code>/delete keyword</code>")
 
     key = message.text.split(" ", 1)[1]
-    btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Confirm", callback_data=f"del#{key}")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="close_data")]
-    ])
+
+    btn = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Confirm Delete", callback_data=f"del#{key}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="close_data")]
+        ]
+    )
 
     await message.reply(
-        f"⚠️ Delete all files related to:\n`{key}` ?",
+        f"⚠️ <b>Permanent Delete</b>\n\nKeyword:\n<code>{key}</code>",
         reply_markup=btn
     )
 
 
 @Client.on_callback_query(filters.regex("^del#"))
-async def confirm_delete(bot, query):
+async def confirm_delete(bot, query: CallbackQuery):
     if query.from_user.id not in ADMINS:
         return
 
     key = query.data.split("#", 1)[1]
     count = await delete_files(key)
+
     await query.message.edit(
-        f"🗑 **Delete Complete**\n\nKeyword: `{key}`\nRemoved: `{count}`"
+        f"🗑 <b>Delete Completed</b>\n\n"
+        f"Keyword: <code>{key}</code>\n"
+        f"Files Removed: <code>{count}</code>"
     )
-
-
-# ======================================================
-# 🚀 START TASKS
-# ======================================================
-
-@Client.on_start()
-async def start_tasks(bot):
-    asyncio.create_task(daily_health_report(bot))
