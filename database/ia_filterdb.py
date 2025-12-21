@@ -36,14 +36,14 @@ def ensure_text_index(col, name="file_name_text"):
         )
         logger.info("TEXT index created")
     except OperationFailure as e:
-        # Index already exists with different options → ignore safely
+        # index already exists or option conflict → safe to ignore
         if "already exists" in str(e) or "IndexOptionsConflict" in str(e):
             logger.info("TEXT index already exists, skipping")
         else:
             raise e
 
 ensure_text_index(collection)
-if second_collection:
+if second_collection is not None:
     ensure_text_index(second_collection)
 
 # ================= COUNT =================
@@ -51,7 +51,7 @@ def db_count_documents():
     return collection.count_documents({})
 
 def second_db_count_documents():
-    if second_collection:
+    if second_collection is not None:
         return second_collection.count_documents({})
     return 0
 
@@ -74,7 +74,7 @@ async def save_file(media):
     except DuplicateKeyError:
         return "dup"
     except OperationFailure:
-        if second_collection:
+        if second_collection is not None:
             try:
                 second_collection.insert_one(document)
                 return "suc"
@@ -105,7 +105,7 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN, lang=None):
         files = list(cursor)
         total = collection.count_documents(text_filter)
 
-        if second_collection:
+        if second_collection is not None:
             cursor2 = second_collection.find(
                 text_filter, projection
             ).sort(
@@ -117,7 +117,7 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN, lang=None):
     except Exception:
         files = []
 
-    # ---------- REGEX FALLBACK (SAFE) ----------
+    # ---------- REGEX FALLBACK ----------
     if not files:
         regex = re.compile(re.escape(query), re.IGNORECASE)
         if USE_CAPTION_FILTER:
@@ -129,7 +129,7 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN, lang=None):
         files = list(cursor)
         total = collection.count_documents(rg_filter)
 
-        if second_collection:
+        if second_collection is not None:
             cursor2 = second_collection.find(rg_filter).skip(offset).limit(max_results)
             files.extend(list(cursor2))
             total += second_collection.count_documents(rg_filter)
@@ -150,7 +150,7 @@ async def delete_files(query):
     result1 = collection.delete_many({"file_name": regex})
     total = result1.deleted_count
 
-    if second_collection:
+    if second_collection is not None:
         result2 = second_collection.delete_many({"file_name": regex})
         total += result2.deleted_count
 
@@ -159,7 +159,7 @@ async def delete_files(query):
 # ================= FILE DETAILS =================
 async def get_file_details(file_id):
     file = collection.find_one({"_id": file_id})
-    if not file and second_collection:
+    if not file and second_collection is not None:
         file = second_collection.find_one({"_id": file_id})
     return file
 
