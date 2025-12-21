@@ -1,183 +1,207 @@
 import re
 import math
+import time
 import asyncio
 from hydrogram import Client, filters, enums
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from info import ADMINS, MAX_BTN, script, LANGUAGES, QUALITY
 from database.users_chats_db import db
 from database.ia_filterdb import get_search_results
-from utils import get_settings, get_size, is_premium, get_shortlink, temp
+from utils import get_settings, get_size, is_premium, temp
 
+# ------------------ ⚡ PERFORMANCE GLOBALS ------------------
+SEARCH_CACHE = {}      # key -> (files, n_offset, total, ts)
+CACHE_TTL = 60         # seconds
+LAST_SEARCH = {}       # user_id -> last_time
+SEARCH_COOLDOWN = 2    # seconds
+
+RE_CLEAN = re.compile(r"[-:\"';!]")
+RE_SPACE = re.compile(r"\s+")
+
+# ------------------ 📩 MESSAGE HANDLER ------------------
 @Client.on_message(filters.text & filters.incoming & (filters.group | filters.private))
 async def filter_handler(client, message):
     if message.text.startswith("/"):
         return
-    
+
     user_id = message.from_user.id
-    is_prm = await is_premium(user_id, client)
-    
-    # --- AttributeError: get_config फिक्स ---
+
+    # ---- Cooldown (anti spam) ----
+    now = time.time()
+    if user_id in LAST_SEARCH and now - LAST_SEARCH[user_id] < SEARCH_COOLDOWN:
+        return
+    LAST_SEARCH[user_id] = now
+
+    # ---- PM Search permission ----
     if message.chat.type == enums.ChatType.PRIVATE:
+        is_prm = await is_premium(user_id, client)
         if user_id not in ADMINS and not is_prm:
-            # पुराने डेटाबेस स्ट्रक्चर के अनुसार stg का उपयोग
             stg = db.get_bot_sttgs()
-            pm_search_all = stg.get('PM_SEARCH', True)
-            if not pm_search_all:
+            if not stg.get("PM_SEARCH", True):
                 return await message.reply_text(
-                    "<b>❌ ᴘᴍ sᴇᴀʀᴄʜ ᴅɪsᴀʙʟᴇᴅ</b>\n\nप्रीमियम यूजर्स ही PM में सर्च कर सकते हैं।"
+                    "<b>❌ PM Search disabled</b>\n\nOnly premium users can search in PM."
                 )
 
-    # सर्च स्ट्रिंग को साफ करना
-    search = re.sub(r"\s+", " ", re.sub(r"[-:\"';!]", " ", message.text)).strip()
-    if not search:
+    # ---- Clean search text ----
+    search = RE_SPACE.sub(
+        " ",
+        RE_CLEAN.sub(" ", message.text)
+    ).strip()
+
+    if not search or len(search) < 2:
         return
 
-    # ऑटो फिल्टर फंक्शन को कॉल करना
     await auto_filter(client, message, None, search)
 
-
+# ------------------ 🔎 AUTO FILTER ------------------
 async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=False):
     settings = await get_settings(message.chat.id)
-    files, n_offset, total = await get_search_results(search, offset=offset)
+    result_mode = settings.get("result_mode", "button")  # button | link
+
+    # ---- CACHE CHECK ----
+    cache_key = f"{search}:{offset}"
+    cached = SEARCH_CACHE.get(cache_key)
+
+    if cached and time.time() - cached[3] < CACHE_TTL:
+        files, n_offset, total = cached[:3]
+    else:
+        files, n_offset, total = await get_search_results(search, offset)
+        SEARCH_CACHE[cache_key] = (files, n_offset, total, time.time())
 
     if not files:
-        if settings.get("spell_check", True):
-            if not reply_msg:
-                reply_msg = await message.reply_text("🔎 Searching...")
-            return await suggest_spelling(message, reply_msg, search)
-        else:
-            if is_edit:
-                return await reply_msg.answer("कोई और फाइल नहीं मिली।", show_alert=True)
-            return await message.reply(f"क्षमा करें, `{search}` नहीं मिला।")
+        return await message.reply(f"❌ `{search}` नहीं मिला")
 
-    req = message.from_user.id if message.from_user else 0
-    is_prm = await is_premium(req, client)
-    short_search = search[:25] 
-    
-    btn = []
-    # --- 'h4hBYE>' हटाने और शॉर्टलिंक जोड़ने का लॉजिक ---
+    req = message.from_user.id
+    short_search = search[:25]
+
+    buttons = []
+
+    # ---------------- FILE RESULTS ----------------
     for file in files:
-        # फ़ाइल नाम से कचरा साफ करना (RegEx का उपयोग)
         clean_name = re.sub(r'^[a-zA-Z0-9]+>', '', file['file_name']).strip()
         f_size = get_size(file['file_size'])
-        
-        if is_prm:
-            # प्रीमियम यूजर्स को डायरेक्ट फाइल बटन मिलेगा
-            btn.append([
-                InlineKeyboardButton(f"[{f_size}] {clean_name}", callback_data=f"file#{file['_id']}")
+
+        # 🔥 RESULT MODE FIXED
+        if result_mode == "link":
+            link = f"https://t.me/{temp.U_NAME}?start=file_{message.chat.id}_{file['_id']}"
+            buttons.append([
+                InlineKeyboardButton(
+                    f"📁 [{f_size}] {clean_name}",
+                    url=link
+                )
             ])
         else:
-            # फ्री यूजर्स के लिए शॉर्टलिंक जनरेट करना
-            f_link = await get_shortlink(
-                settings['url'], 
-                settings['api'], 
-                f"https://t.me/{temp.U_NAME}?start=file_{message.chat.id}_{file['_id']}"
-            )
-            btn.append([
-                InlineKeyboardButton(f"⚡ [{f_size}] {clean_name}", url=f_link)
+            buttons.append([
+                InlineKeyboardButton(
+                    f"📁 [{f_size}] {clean_name}",
+                    callback_data=f"file#{file['_id']}"
+                )
             ])
 
-    # पेजिनेशन बटन्स (Back | Page/Total | Next)
-    pagination = []
-    if offset != 0:
-        pagination.append(
-            InlineKeyboardButton("« ʙᴀᴄᴋ", callback_data=f"next_{req}_{int(offset)-MAX_BTN}_{short_search}")
+    # ---------------- PAGINATION ----------------
+    page_btn = []
+
+    if offset > 0:
+        page_btn.append(
+            InlineKeyboardButton(
+                "« ʙᴀᴄᴋ",
+                callback_data=f"next_{req}_{offset-MAX_BTN}_{short_search}"
+            )
         )
-    
-    pagination.append(
+
+    page_btn.append(
         InlineKeyboardButton(
-            f"{math.ceil(int(offset)/MAX_BTN)+1}/{math.ceil(int(total)/MAX_BTN)}", 
+            f"{offset//MAX_BTN + 1}/{math.ceil(total/MAX_BTN)}",
             callback_data="pages"
         )
     )
-    
-    if n_offset != "":
-        pagination.append(
-            InlineKeyboardButton("ɴᴇxᴛ »", callback_data=f"next_{req}_{n_offset}_{short_search}")
+
+    if n_offset:
+        page_btn.append(
+            InlineKeyboardButton(
+                "ɴᴇxᴛ »",
+                callback_data=f"next_{req}_{n_offset}_{short_search}"
+            )
         )
-    
-    btn.append(pagination)
-    
-    # भाषा और क्वालिटी के बटन्स
-    btn.insert(0, [
-        InlineKeyboardButton("🌐 ʟᴀɴɢᴜᴀɢᴇ", callback_data=f"filter_menu#lang#{req}#{offset}#{short_search}"),
-        InlineKeyboardButton("🔍 ǫᴜᴀʟɪᴛʏ", callback_data=f"filter_menu#qual#{req}#{offset}#{short_search}")
+
+    buttons.append(page_btn)
+
+    # ---------------- FILTER BUTTONS ----------------
+    buttons.insert(0, [
+        InlineKeyboardButton("🌐 Language", callback_data=f"filter_menu#lang#{req}#{offset}#{short_search}"),
+        InlineKeyboardButton("🔍 Quality", callback_data=f"filter_menu#qual#{req}#{offset}#{short_search}")
     ])
 
-    # प्रीमियम खरीदने का बटन (सिर्फ नॉन-प्रीमियम के लिए)
-    if not is_prm:
-        btn.append([
-            InlineKeyboardButton('🤑 ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ', url=f"https://t.me/{temp.U_NAME}?start=premium")
-        ])
-
-    full_caption = f"<b>💭 ʜᴇʏ,\n♻️ ʜᴇʀᴇ ɪ ꜰᴏᴜɴᴅ ꜰᴏʀ ʏᴏᴜʀ sᴇᴀʀᴄʜ {search}...</b>"
+    caption = (
+        f"<b>💭 Hey!\n"
+        f"♻️ Results for:</b> <code>{search}</code>\n\n"
+        f"<i>⚡ Ultra-Fast Search Enabled</i>"
+    )
 
     if is_edit:
-        try:
-            await reply_msg.edit_text(
-                text=full_caption, 
-                reply_markup=InlineKeyboardMarkup(btn), 
-                disable_web_page_preview=True
-            )
-        except Exception:
-            pass
+        await reply_msg.edit_text(caption, reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await message.reply_text(
-            text=full_caption,
-            reply_markup=InlineKeyboardMarkup(btn),
-            disable_web_page_preview=True,
-            quote=True
-        )
+        await message.reply_text(caption, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
 
-
-# --- CALLBACK HANDLERS (बहाल किया गया) ---
+# ------------------ 🔁 CALLBACK HANDLER ------------------
 @Client.on_callback_query(filters.regex(r"^(next|filter_menu|apply_filter)"))
 async def cb_handler(client, query):
     data = query.data
-    
-    # अगले पेज के लिए हैंडलर
+
     if data.startswith("next"):
         _, req, offset, search = data.split("_")
-        if int(req) not in [query.from_user.id, 0]:
-            return await query.answer("यह आपके लिए नहीं है!", show_alert=True)
-        await auto_filter(client, query.message.reply_to_message, query.message, search, offset=int(offset), is_edit=True)
-    
-    # भाषा/क्वालिटी मेनू के लिए
+        if int(req) != query.from_user.id:
+            return await query.answer("❌ Not for you", show_alert=True)
+
+        await auto_filter(
+            client,
+            query.message.reply_to_message,
+            query.message,
+            search,
+            int(offset),
+            True
+        )
+
     elif data.startswith("filter_menu"):
-        _, type, req, offset, search = data.split("#")
-        items = LANGUAGES if type == "lang" else QUALITY
+        _, ftype, req, offset, search = data.split("#")
+        items = LANGUAGES if ftype == "lang" else QUALITY
         btn = []
+
         for i in range(0, len(items), 2):
-            row = [InlineKeyboardButton(items[i].title(), callback_data=f"apply_filter#{items[i]}#{search}#{offset}#{req}")]
+            row = [
+                InlineKeyboardButton(
+                    items[i].title(),
+                    callback_data=f"apply_filter#{items[i]}#{search}#{offset}#{req}"
+                )
+            ]
             if i+1 < len(items):
-                row.append(InlineKeyboardButton(items[i+1].title(), callback_data=f"apply_filter#{items[i+1]}#{search}#{offset}#{req}"))
+                row.append(
+                    InlineKeyboardButton(
+                        items[i+1].title(),
+                        callback_data=f"apply_filter#{items[i+1]}#{search}#{offset}#{req}"
+                    )
+                )
             btn.append(row)
-        
-        btn.append([InlineKeyboardButton("⪻ ʙᴀᴄᴋ", callback_data=f"next_{req}_{offset}_{search}")])
+
+        btn.append([InlineKeyboardButton("⪻ Back", callback_data=f"next_{req}_{offset}_{search}")])
+
         await query.message.edit_text(
-            f"<b>Select {type.title()} for '{search}':</b>", 
+            f"<b>Select {ftype.title()}:</b>",
             reply_markup=InlineKeyboardMarkup(btn)
         )
 
-    # फिल्टर अप्लाई करने के लिए
     elif data.startswith("apply_filter"):
         _, choice, search, offset, req = data.split("#")
-        if int(req) not in [query.from_user.id, 0]:
-            return await query.answer("यह आपके लिए नहीं है!", show_alert=True)
-        await auto_filter(client, query.message.reply_to_message, query.message, f"{search} {choice}", offset=0, is_edit=True)
-    
+        if int(req) != query.from_user.id:
+            return await query.answer("❌ Not for you", show_alert=True)
+
+        await auto_filter(
+            client,
+            query.message.reply_to_message,
+            query.message,
+            f"{search} {choice}",
+            0,
+            True
+        )
+
     await query.answer()
-
-
-# --- SPELLING SUGGESTION (बहाल किया गया) ---
-async def suggest_spelling(message, reply_msg, search):
-    """अगर फिल्म नहीं मिलती तो गूगल सर्च का सुझाव दें"""
-    btn = [
-        [InlineKeyboardButton("🔎 Search Google", url=f"https://www.google.com/search?q={search.replace(' ', '+')}")],
-        [InlineKeyboardButton("🚫 Close", callback_data="close_data")]
-    ]
-    await reply_msg.edit(
-        text=f"👋 Hello {message.from_user.mention if message.from_user else 'User'},\n\nमुझे डेटाबेस में <b>'{search}'</b> नहीं मिला।\n\nकृपया स्पेलिंग चेक करें या गूगल पर खोजें।", 
-        reply_markup=InlineKeyboardMarkup(btn)
-    )
-
