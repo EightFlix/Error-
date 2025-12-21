@@ -40,6 +40,15 @@ ensure_text_index(collection)
 if second_collection is not None:
     ensure_text_index(second_collection)
 
+# ================= COUNTS (FIXED) =================
+def db_count_documents():
+    return collection.estimated_document_count()
+
+def second_db_count_documents():
+    if second_collection is not None:
+        return second_collection.estimated_document_count()
+    return 0
+
 # ================= ULTRA CACHE =================
 SEARCH_CACHE = {}
 CACHE_TTL = 60  # seconds
@@ -125,10 +134,13 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN, lang=None):
 
     # ---------- TYPO RETRY ----------
     if not files:
-        titles = collection.distinct("file_name")
-        fix = typo_fix(q, titles)
-        if fix and fix != q:
-            return await get_search_results(fix, offset, max_results, lang)
+        try:
+            titles = collection.distinct("file_name")
+            fix = typo_fix(q, titles)
+            if fix and fix != q:
+                return await get_search_results(fix, offset, max_results, lang)
+        except Exception:
+            pass
 
     # ---------- LANGUAGE FILTER ----------
     if lang:
@@ -139,6 +151,27 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN, lang=None):
     result = (files[:max_results], next_offset, total)
     cache_set(cache_key, result)
     return result
+
+# ================= DELETE (FIXED) =================
+async def delete_files(query):
+    q = query.strip().lower()
+    regex = re.compile(re.escape(q), re.IGNORECASE)
+
+    res = collection.delete_many({"file_name": regex})
+    total = res.deleted_count
+
+    if second_collection is not None:
+        res2 = second_collection.delete_many({"file_name": regex})
+        total += res2.deleted_count
+
+    return total
+
+# ================= FILE DETAILS =================
+async def get_file_details(file_id):
+    doc = collection.find_one({"_id": file_id})
+    if not doc and second_collection is not None:
+        doc = second_collection.find_one({"_id": file_id})
+    return doc
 
 # ================= SAVE FILE =================
 async def save_file(media):
@@ -166,13 +199,6 @@ async def save_file(media):
             except DuplicateKeyError:
                 return "dup"
         return "err"
-
-# ================= FILE DETAILS =================
-async def get_file_details(file_id):
-    doc = collection.find_one({"_id": file_id})
-    if not doc and second_collection is not None:
-        doc = second_collection.find_one({"_id": file_id})
-    return doc
 
 # ================= FILE ID UTILS =================
 def encode_file_id(s: bytes) -> str:
