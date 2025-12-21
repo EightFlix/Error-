@@ -7,11 +7,11 @@ from difflib import get_close_matches
 from datetime import datetime
 
 from hydrogram.file_id import FileId
-from pymongo import MongoClient, TEXT
+from pymongo import MongoClient, TEXT, ASCENDING
 from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from info import (
-    FILES_DATABASE_URL,
+    DATA_DATABASE_URL,
     DATABASE_NAME,
     COLLECTION_NAME,
     MAX_BTN,
@@ -21,14 +21,14 @@ from info import (
 logger = logging.getLogger(__name__)
 
 # =====================================================
-# 📦 DATABASE (SINGLE DB ONLY)
+# 📦 DATABASE (SINGLE DB – FINAL)
 # =====================================================
-client = MongoClient(FILES_DATABASE_URL, serverSelectionTimeoutMS=5000)
+client = MongoClient(DATA_DATABASE_URL, serverSelectionTimeoutMS=5000)
 db = client[DATABASE_NAME]
 collection = db[COLLECTION_NAME]
 
 # =====================================================
-# 🚀 DB INDEX TUNING (ULTRA FAST)
+# 🚀 DB INDEX TUNING (FAST SEARCH)
 # =====================================================
 def ensure_indexes(col):
     try:
@@ -36,10 +36,10 @@ def ensure_indexes(col):
             [("file_name", TEXT), ("caption", TEXT)],
             name="file_text_index"
         )
-        col.create_index("quality")
-        col.create_index("updated_at")
-    except OperationFailure:
-        pass
+        col.create_index([("quality", ASCENDING)], name="quality_idx")
+        col.create_index([("updated_at", ASCENDING)], name="updated_at_idx")
+    except OperationFailure as e:
+        logger.warning(f"Index warning: {e}")
 
 ensure_indexes(collection)
 
@@ -69,20 +69,22 @@ def cache_set(key, value):
     SEARCH_CACHE[key] = (value, time.time())
 
 # =====================================================
-# 🧠 QUALITY AUTO DETECT
+# 🧠 AUTO QUALITY DETECT
 # =====================================================
 def detect_quality(name: str) -> str:
     n = name.lower()
     if "2160" in n or "4k" in n:
-        return "4k"
+        return "2160p"
     if "1080" in n:
         return "1080p"
     if "720" in n:
         return "720p"
+    if "480" in n:
+        return "480p"
     return "unknown"
 
 # =====================================================
-# 🧠 ML-less FUZZY BOOST
+# 🧠 ML-LESS FUZZY BOOST
 # =====================================================
 def fuzzy_fix(query, choices):
     match = get_close_matches(query, choices, n=1, cutoff=0.7)
@@ -123,7 +125,8 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN):
         )
         files = list(cursor)
         total = collection.count_documents(text_filter)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Text search error: {e}")
         files = []
 
     # ---------- REGEX FALLBACK ----------
@@ -154,11 +157,10 @@ async def get_search_results(query, offset=0, max_results=MAX_BTN):
     return result
 
 # =====================================================
-# 🗑 DELETE FILES
+# 🗑 DELETE FILES (ADMIN SAFE)
 # =====================================================
 async def delete_files(query):
-    q = query.strip().lower()
-    regex = re.compile(re.escape(q), re.IGNORECASE)
+    regex = re.compile(re.escape(query), re.IGNORECASE)
     res = collection.delete_many({"file_name": regex})
     return res.deleted_count
 
@@ -176,7 +178,6 @@ async def save_file(media):
 
     name = re.sub(r"@\w+|[_\-.+]", " ", str(media.file_name or "")).strip()
     cap = re.sub(r"@\w+|[_\-.+]", " ", str(media.caption or "")).strip()
-
     quality = detect_quality(name)
 
     doc = {
@@ -191,8 +192,8 @@ async def save_file(media):
     try:
         collection.insert_one(doc)
         return "suc"
+
     except DuplicateKeyError:
-        # caption / quality update on re-index
         collection.update_one(
             {"_id": file_id},
             {"$set": {
@@ -202,6 +203,7 @@ async def save_file(media):
             }}
         )
         return "dup"
+
     except Exception as e:
         logger.error(f"Save file error: {e}")
         return "err"
