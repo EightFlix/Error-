@@ -1,5 +1,6 @@
 import qrcode
 import secrets
+import asyncio
 from io import BytesIO
 from datetime import datetime, timedelta
 
@@ -17,21 +18,26 @@ from info import (
 )
 
 from database.users_chats_db import db
-from utils import is_premium
-
+from utils import is_premium, temp
 
 # ======================================================
 # 🔧 HELPERS
 # ======================================================
 
+REMINDER_STEPS = [
+    ("12 hours", timedelta(hours=12)),
+    ("6 hours", timedelta(hours=6)),
+    ("3 hours", timedelta(hours=3)),
+    ("1 hour", timedelta(hours=1)),
+    ("10 minutes", timedelta(minutes=10)),
+]
+
 def format_time(dt: datetime) -> str:
     return dt.strftime("%d %b %Y, %I:%M %p")
-
 
 def parse_duration(text: str):
     text = text.lower().strip()
     num = int("".join(filter(str.isdigit, text)) or 0)
-
     if num <= 0:
         return None
     if "min" in text:
@@ -46,10 +52,8 @@ def parse_duration(text: str):
         return timedelta(days=365 * num)
     return None
 
-
 def generate_invoice_id():
     return "PRM-" + secrets.token_hex(3).upper()
-
 
 def build_invoice_text(inv: dict) -> str:
     return (
@@ -62,17 +66,10 @@ def build_invoice_text(inv: dict) -> str:
         "Thank you for your purchase 💙"
     )
 
-
-def user_buttons(is_prm: bool):
-    if is_prm:
-        return None
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("💰 Buy Premium", callback_data="buy_premium")],
-            [InlineKeyboardButton("📨 Request Trial", callback_data="request_trial")],
-        ]
-    )
-
+def buy_button():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Buy / Renew Premium", callback_data="buy_premium")]
+    ])
 
 # ======================================================
 # 👤 USER COMMANDS
@@ -81,249 +78,113 @@ def user_buttons(is_prm: bool):
 @Client.on_message(filters.command("plan") & filters.private)
 async def plan_cmd(_, message):
     if not IS_PREMIUM:
-        return await message.reply("⚠️ Premium system is currently disabled.")
+        return await message.reply("⚠️ Premium system is disabled.")
 
     if message.from_user.id in ADMINS:
         return await message.reply(
-            "👑 **Admin Access**\n\n"
-            "You have lifetime premium access.\n"
-            "No expiry. No limits. 🚀"
+            "👑 **Admin Access**\nLifetime Premium\nNo expiry 🚀"
         )
 
-    premium = await is_premium(message.from_user.id, message._client)
+    prm = await is_premium(message.from_user.id, message._client)
+    if prm:
+        return await message.reply("✅ You already have Premium.\nUse /myplan")
 
     await message.reply(
-        "💎 **Premium Plans**\n\n"
-        "Upgrade to premium and enjoy:\n"
-        "🚀 Faster Access\n"
-        "🔓 No Ads\n"
-        "📩 PM Search Enabled\n",
-        reply_markup=user_buttons(premium),
+        "💎 **Premium Benefits**\n\n"
+        "🚀 Faster access\n"
+        "🔓 No ads\n"
+        "📩 PM Search\n",
+        reply_markup=buy_button()
     )
-
 
 @Client.on_message(filters.command("myplan") & filters.private)
 async def myplan_cmd(_, message):
     if message.from_user.id in ADMINS:
-        return await message.reply(
-            "👑 **Admin Plan**\nPlan: Lifetime Premium\nExpires: Never"
-        )
-
-    if not await is_premium(message.from_user.id, message._client):
-        return await message.reply(
-            "❌ You do not have an active premium plan.\nUse /plan to upgrade."
-        )
+        return await message.reply("👑 Lifetime Premium")
 
     mp = db.get_plan(message.from_user.id)
+    if not mp.get("premium"):
+        return await message.reply("❌ No active premium.")
+
     await message.reply(
         "🎉 **Premium Active**\n\n"
-        f"💎 Plan: {mp.get('plan','Premium')}\n"
+        f"💎 Plan: {mp.get('plan')}\n"
         f"⏰ Valid Till: {format_time(mp['expire'])}"
     )
 
+@Client.on_message(filters.command("invoice") & filters.private)
+async def invoice_cmd(_, message):
+    mp = db.get_plan(message.from_user.id)
+    inv = mp.get("invoice")
+    if not inv:
+        return await message.reply("❌ No invoice found.")
+    await message.reply(build_invoice_text(inv))
 
 # ======================================================
-# 📨 TRIAL REQUEST (ADMIN DECIDES)
+# 🔔 PREMIUM REMINDER SCHEDULER
 # ======================================================
 
-@Client.on_callback_query(filters.regex("^request_trial$"))
-async def trial_request(_, query: CallbackQuery):
-    await query.answer("Trial request sent to admin.", show_alert=True)
+async def premium_reminder_worker(bot: Client):
+    while True:
+        users = db.get_premium_users()
+        now = datetime.utcnow()
 
-    await query.message.edit(
-        "📨 **Trial Requested**\n\n"
-        "Your request has been sent to the admin.\n"
-        "You will be notified if approved."
-    )
+        for u in users:
+            uid = u["id"]
+            if uid in ADMINS:
+                continue
 
-    await query._client.send_message(
-        ADMINS[0],
-        f"#TrialRequest\n"
-        f"👤 User: {query.from_user.mention}\n"
-        f"🆔 ID: `{query.from_user.id}`"
-    )
+            mp = u["status"]
+            if not mp.get("premium"):
+                continue
 
+            expire = mp.get("expire")
+            if not expire:
+                continue
 
-# ======================================================
-# 💰 BUY / RENEW PREMIUM
-# ======================================================
+            remaining = expire - now
+            last_sent = mp.get("last_reminder")
 
-@Client.on_callback_query(filters.regex("^buy_premium$"))
-async def buy_premium(_, query: CallbackQuery):
-    # cleanup reminders hook
-    db.update_plan(query.from_user.id, {
-        "last_msg_id": None,
-        "last_reminder": None
-    })
+            for label, delta in REMINDER_STEPS:
+                if remaining <= delta and last_sent != label:
+                    try:
+                        # delete old reminder
+                        if mp.get("last_msg_id"):
+                            await bot.delete_messages(uid, mp["last_msg_id"])
+                    except:
+                        pass
 
-    last_plan = db.get_plan(query.from_user.id).get("last_plan")
+                    msg = await bot.send_message(
+                        uid,
+                        f"⏳ **Premium Expiry Alert**\n\n"
+                        f"Your premium will expire in **{label}**.\n\n"
+                        f"⏰ Expiry: {format_time(expire)}",
+                        reply_markup=buy_button()
+                    )
 
-    await query.message.edit(
-        "⏳ **Choose Premium Duration**\n\n"
-        f"{'Last Plan: ' + last_plan + '\\n' if last_plan else ''}"
-        "Send duration like:\n"
-        "`10 minutes`\n"
-        "`3 hours`\n"
-        "`7 days`\n"
-        "`1 month`\n"
-        "`1 year`"
-    )
+                    mp.update({
+                        "last_reminder": label,
+                        "last_msg_id": msg.id
+                    })
+                    db.update_plan(uid, mp)
+                    break
 
-    try:
-        msg = await query._client.listen(
-            chat_id=query.message.chat.id,
-            user_id=query.from_user.id,
-            timeout=300,
-        )
-        duration = parse_duration(msg.text)
-        if not duration:
-            raise ValueError
-    except (ListenerTimeout, ValueError):
-        return await query.message.reply("❌ Invalid or timed out. Try again.")
+            if remaining.total_seconds() <= 0:
+                try:
+                    await bot.send_message(
+                        uid,
+                        "❌ **Premium Expired**\n\nRenew to continue premium access.",
+                        reply_markup=buy_button()
+                    )
+                except:
+                    pass
+                mp.update({
+                    "premium": False,
+                    "plan": "",
+                    "expire": "",
+                    "last_reminder": None,
+                    "last_msg_id": None
+                })
+                db.update_plan(uid, mp)
 
-    days = max(1, duration.days)
-    amount = days * PRE_DAY_AMOUNT
-
-    db.update_plan(query.from_user.id, {"last_plan": msg.text})
-
-    upi = (
-        f"upi://pay?pa={UPI_ID}&pn={UPI_NAME}"
-        f"&am={amount}&cu=INR&tn=Premium for {query.from_user.id}"
-    )
-
-    qr = qrcode.make(upi)
-    bio = BytesIO()
-    qr.save(bio, "PNG")
-    bio.seek(0)
-
-    await query.message.reply_photo(
-        bio,
-        caption=(
-            "💰 **Complete Payment**\n\n"
-            f"🕒 Plan: {msg.text}\n"
-            f"💵 Amount: ₹{amount}\n\n"
-            "Scan the QR and send the payment screenshot."
-        ),
-    )
-
-    try:
-        receipt = await query._client.listen(
-            chat_id=query.message.chat.id,
-            user_id=query.from_user.id,
-            timeout=600,
-        )
-        if not receipt.photo:
-            raise ValueError
-    except Exception:
-        return await query.message.reply("❌ Screenshot not received.")
-
-    await receipt.reply("✅ Screenshot received.\n⏳ Waiting for admin approval.")
-
-    buttons = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("✅ Payment Received", callback_data=f"pay_ok#{query.from_user.id}"),
-            InlineKeyboardButton("❌ Payment Not Received", callback_data=f"pay_no#{query.from_user.id}")
-        ]]
-    )
-
-    await query._client.send_photo(
-        RECEIPT_SEND_USERNAME,
-        receipt.photo.file_id,
-        caption=(
-            "#PremiumPayment\n"
-            f"👤 User: {query.from_user.mention}\n"
-            f"🆔 ID: `{query.from_user.id}`\n"
-            f"💵 Amount: ₹{amount}\n"
-            f"📦 Requested: {msg.text}"
-        ),
-        reply_markup=buttons,
-    )
-
-
-# ======================================================
-# 🛂 ADMIN DECISION + INVOICE
-# ======================================================
-
-@Client.on_callback_query(filters.regex("^pay_ok"))
-async def admin_ok(_, query: CallbackQuery):
-    if query.from_user.id not in ADMINS:
-        return await query.answer("Not allowed", show_alert=True)
-
-    user_id = int(query.data.split("#")[1])
-
-    await query.message.reply(
-        "⏳ **Activate Premium**\n\n"
-        "Send duration like:\n"
-        "`1 day`, `1 month`, `1 year`, `3 hours`"
-    )
-
-    try:
-        msg = await query._client.listen(
-            chat_id=query.message.chat.id,
-            user_id=query.from_user.id,
-            timeout=300,
-        )
-        duration = parse_duration(msg.text)
-        if not duration:
-            raise ValueError
-    except Exception:
-        return await query.message.reply("❌ Invalid duration.")
-
-    now = datetime.utcnow()
-    expire = now + duration
-    invoice_id = generate_invoice_id()
-
-    amount = PRE_DAY_AMOUNT * max(1, duration.days)
-
-    invoice = {
-        "id": invoice_id,
-        "plan": msg.text,
-        "amount": amount,
-        "activated": format_time(now),
-        "expire": format_time(expire),
-        "created_at": now,
-    }
-
-    db.update_plan(
-        user_id,
-        {
-            "premium": True,
-            "plan": msg.text,
-            "activated_at": now,
-            "expire": expire,
-            "invoice": invoice,
-            "last_msg_id": None,
-            "last_reminder": None,
-        },
-    )
-
-    await query._client.send_message(
-        user_id,
-        "🎉 **Premium Activated!**\n\n"
-        f"💎 Plan: {msg.text}\n"
-        f"🕒 Activated At: {format_time(now)}\n"
-        f"⏰ Valid Till: {format_time(expire)}"
-    )
-
-    await query._client.send_message(
-        user_id,
-        build_invoice_text(invoice)
-    )
-
-    await query.message.edit("✅ Premium activated successfully.")
-
-
-@Client.on_callback_query(filters.regex("^pay_no"))
-async def admin_no(_, query: CallbackQuery):
-    if query.from_user.id not in ADMINS:
-        return await query.answer("Not allowed", show_alert=True)
-
-    user_id = int(query.data.split("#")[1])
-
-    await query._client.send_message(
-        user_id,
-        "❌ **Payment Not Received**\n\n"
-        "If you have paid, please contact the admin 📩",
-    )
-
-    await query.message.edit("❌ Payment marked as not received.")
+        await asyncio.sleep(300)  # every 5 minutes
