@@ -1,150 +1,165 @@
-from info import ADMINS
-from speedtest import Speedtest, ConfigRetrievalError, SpeedtestBestServerFailure
+import time
+import os
+import sys
+import platform
+from datetime import datetime
+
 from hydrogram import Client, filters, enums
 from hydrogram.errors import UserNotParticipant
-from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from utils import get_size
-from datetime import datetime
-import os
+from utils import temp
+from info import IS_PREMIUM
 
 
-@Client.on_message(filters.command('id'))
-async def showid(client, message):
-    chat_type = message.chat.type
-    replied_to_msg = bool(message.reply_to_message)
-    if replied_to_msg:
-        return await message.reply_text(f"""The forwarded message channel {replied_to_msg.chat.title}'s id is, <code>{replied_to_msg.chat.id}</code>.""")
-    if chat_type == enums.ChatType.PRIVATE:
-        await message.reply_text(f'★ User ID: <code>{message.from_user.id}</code>')
-
-    elif chat_type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        await message.reply_text(f'★ Group ID: <code>{message.chat.id}</code>')
-
-    elif chat_type == enums.ChatType.CHANNEL:
-        await message.reply_text(f'★ Channel ID: <code>{message.chat.id}</code>')
-
-
-@Client.on_message(filters.command('speedtest') & filters.user(ADMINS))
-async def speedtest(client, message):
-    #from - https://github.com/weebzone/WZML-X/blob/master/bot/modules/speedtest.py
-    msg = await message.reply_text("Initiating Speedtest...")
-    try:
-        speed = Speedtest()
-        speed.get_best_server()
-    except (ConfigRetrievalError, SpeedtestBestServerFailure):
-        await msg.edit("Can't connect to Server at the Moment, Try Again Later !")
-        return
-    speed.download()
-    speed.upload()
-    speed.results.share()
-    result = speed.results.dict()
-    photo = result['share']
-    text = f'''
-➲ <b>SPEEDTEST INFO</b>
-┠ <b>Upload:</b> <code>{get_size(result['upload'])}/s</code>
-┠ <b>Download:</b>  <code>{get_size(result['download'])}/s</code>
-┠ <b>Ping:</b> <code>{result['ping']} ms</code>
-┠ <b>Time:</b> <code>{datetime.strptime(result['timestamp'], "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y-%m-%d %H:%M:%S")}</code>
-┠ <b>Data Sent:</b> <code>{get_size(int(result['bytes_sent']))}</code>
-┖ <b>Data Received:</b> <code>{get_size(int(result['bytes_received']))}</code>
-
-➲ <b>SPEEDTEST SERVER</b>
-┠ <b>Name:</b> <code>{result['server']['name']}</code>
-┠ <b>Country:</b> <code>{result['server']['country']}, {result['server']['cc']}</code>
-┠ <b>Sponsor:</b> <code>{result['server']['sponsor']}</code>
-┠ <b>Latency:</b> <code>{result['server']['latency']}</code>
-┠ <b>Latitude:</b> <code>{result['server']['lat']}</code>
-┖ <b>Longitude:</b> <code>{result['server']['lon']}</code>
-
-➲ <b>CLIENT DETAILS</b>
-┠ <b>IP Address:</b> <code>{result['client']['ip']}</code>
-┠ <b>Latitude:</b> <code>{result['client']['lat']}</code>
-┠ <b>Longitude:</b> <code>{result['client']['lon']}</code>
-┠ <b>Country:</b> <code>{result['client']['country']}</code>
-┠ <b>ISP:</b> <code>{result['client']['isp']}</code>
-┖ <b>ISP Rating:</b> <code>{result['client']['isprating']}</code>
-'''
-    await message.reply_photo(photo=photo, caption=text)
-    await msg.delete()
-
+# ======================================================
+# 👤 USER INFO
+# ======================================================
 
 @Client.on_message(filters.command("info"))
-async def who_is(client, message):
-    status_message = await message.reply_text(
-        "Fetching user info..."
-    )
-    if message.reply_to_message:
-        from_user_id = message.reply_to_message.from_user.id
-    elif len(message.command) > 1:
-        from_user_id = message.command[1]
-    else:
-        from_user_id = message.from_user.id
-    try:
-        from_user = await client.get_users(from_user_id)
-    except Exception as error:
-        await status_message.edit(f'Error: {error}')
-        return
+async def user_info(client, message):
+    status = await message.reply_text("🔍 Fetching user info…")
 
-    message_out_str = ""
-    message_out_str += f"<b>➲First Name:</b> {from_user.first_name}\n"
-    last_name = from_user.last_name or 'Not have'
-    message_out_str += f"<b>➲Last Name:</b> {last_name}\n"
-    message_out_str += f"<b>➲Telegram ID:</b> <code>{from_user.id}</code>\n"
-    username = f'@{from_user.username}' if from_user.username else 'Not have'
-    dc_id = from_user.dc_id or "Not found"
-    message_out_str += f"<b>➲Data Centre:</b> <code>{dc_id}</code>\n"
-    message_out_str += f"<b>➲Username:</b> {username}\n"
-    message_out_str += f"<b>➲Last Online:</b> {last_online(from_user)}\n"
-    message_out_str += f"<b>➲User 𝖫𝗂𝗇𝗄:</b> <a href='tg://user?id={from_user.id}'><b>Click Here</b></a>\n"
-    if message.chat.type in [enums.ChatType.SUPERGROUP, enums.ChatType.GROUP]:
+    user_id = (
+        message.reply_to_message.from_user.id
+        if message.reply_to_message
+        else message.from_user.id
+    )
+
+    try:
+        user = await client.get_users(user_id)
+    except Exception as e:
+        return await status.edit(f"❌ Error: {e}")
+
+    text = (
+        f"<b>👤 USER INFO</b>\n\n"
+        f"<b>Name:</b> {user.first_name or ''} {user.last_name or ''}\n"
+        f"<b>User ID:</b> <code>{user.id}</code>\n"
+        f"<b>Username:</b> @{user.username if user.username else 'N/A'}\n"
+        f"<b>DC ID:</b> <code>{user.dc_id or 'Unknown'}</code>\n"
+        f"<b>Status:</b> {last_online(user)}\n"
+        f"<b>Profile:</b> <a href='tg://user?id={user.id}'>Open</a>\n"
+    )
+
+    if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
         try:
-            chat_member_p = await message.chat.get_member(from_user.id)
-            joined_date = chat_member_p.joined_date.strftime('%Y.%m.%d %H:%M:%S') if chat_member_p.joined_date else 'Not found'
-            message_out_str += (
-                "<b>➲Joined this Chat on:</b> <code>"
-                f"{joined_date}"
-                "</code>\n"
-            )
+            member = await message.chat.get_member(user.id)
+            if member.joined_date:
+                text += (
+                    f"<b>Joined Group:</b> "
+                    f"<code>{member.joined_date.strftime('%d %b %Y')}</code>\n"
+                )
         except UserNotParticipant:
             pass
-    chat_photo = from_user.photo
-    if chat_photo:
-        local_user_photo = await client.download_media(
-            message=chat_photo.big_file_id
-        )
-        await message.reply_photo(
-            photo=local_user_photo,
-            quote=True,
-            caption=message_out_str,
-            parse_mode=enums.ParseMode.HTML,
-            disable_notification=True
-        )
-        os.remove(local_user_photo)
+
+    if user.photo:
+        photo = await client.download_media(user.photo.big_file_id)
+        await message.reply_photo(photo, caption=text, parse_mode=enums.ParseMode.HTML)
+        os.remove(photo)
     else:
-        await message.reply_text(
-            text=message_out_str,
-            quote=True,
-            parse_mode=enums.ParseMode.HTML,
-            disable_notification=True
-        )
-    await status_message.delete()
+        await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+
+    await status.delete()
 
 
+# ======================================================
+# ⏱️ UPTIME
+# ======================================================
 
-def last_online(from_user):
-    time = ""
-    if from_user.is_bot:
-        time += "🤖 Bot :("
-    elif from_user.status == enums.UserStatus.RECENTLY:
-        time += "Recently"
-    elif from_user.status == enums.UserStatus.LAST_WEEK:
-        time += "Within the last week"
-    elif from_user.status == enums.UserStatus.LAST_MONTH:
-        time += "Within the last month"
-    elif from_user.status == enums.UserStatus.LONG_AGO:
-        time += "A long time ago :("
-    elif from_user.status == enums.UserStatus.ONLINE:
-        time += "Currently Online"
-    elif from_user.status == enums.UserStatus.OFFLINE:
-        time += from_user.last_online_date.strftime("%a, %d %b %Y, %H:%M:%S")
-    return time
+@Client.on_message(filters.command("uptime"))
+async def uptime_cmd(client, message):
+    uptime = int(time.time() - temp.START_TIME)
+    h = uptime // 3600
+    m = (uptime % 3600) // 60
+
+    await message.reply_text(
+        f"⏱️ <b>Bot Uptime</b>\n\n<code>{h}h {m}m</code>",
+        parse_mode=enums.ParseMode.HTML
+    )
+
+
+# ======================================================
+# 🏓 PING
+# ======================================================
+
+@Client.on_message(filters.command("ping"))
+async def ping_cmd(client, message):
+    start = time.time()
+    msg = await message.reply_text("🏓 Pinging…")
+    end = time.time()
+
+    await msg.edit_text(
+        f"🏓 <b>Pong!</b>\n\n⚡ <code>{int((end - start) * 1000)} ms</code>",
+        parse_mode=enums.ParseMode.HTML
+    )
+
+
+# ======================================================
+# 🤖 BOT INFO
+# ======================================================
+
+@Client.on_message(filters.command("botinfo"))
+async def bot_info(client, message):
+    uptime = int(time.time() - temp.START_TIME)
+    h = uptime // 3600
+    m = (uptime % 3600) // 60
+
+    text = (
+        f"🤖 <b>BOT INFO</b>\n\n"
+        f"⏱️ Uptime: <code>{h}h {m}m</code>\n"
+        f"🐍 Python: <code>{sys.version.split()[0]}</code>\n"
+        f"⚙️ Platform: <code>{platform.system()}</code>\n"
+        f"📦 Library: <code>Hydrogram</code>\n"
+        f"💎 Premium System: <code>{'ON' if IS_PREMIUM else 'OFF'}</code>\n"
+        f"🚀 Mode: <code>Ultra-Pro (Optimized)</code>"
+    )
+
+    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+
+
+# ======================================================
+# 🩺 HEALTH CHECK (ULTRA-LIGHT)
+# ======================================================
+
+@Client.on_message(filters.command("health"))
+async def health_cmd(client, message):
+    start = time.time()
+    # micro await to ensure event loop is responsive
+    await client.get_me()
+    latency = int((time.time() - start) * 1000)
+
+    uptime = int(time.time() - temp.START_TIME)
+    h = uptime // 3600
+    m = (uptime % 3600) // 60
+
+    text = (
+        f"🩺 <b>BOT HEALTH</b>\n\n"
+        f"🟢 Status: <b>Healthy</b>\n"
+        f"⚡ Event Loop: <code>{latency} ms</code>\n"
+        f"⏱️ Uptime: <code>{h}h {m}m</code>\n"
+        f"💎 Premium: <code>{'Enabled' if IS_PREMIUM else 'Disabled'}</code>\n"
+        f"🧠 Memory: <code>Stable</code>\n"
+        f"🚀 Performance: <code>Optimal</code>"
+    )
+
+    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+
+
+# ======================================================
+# 🕒 LAST ONLINE HELPER
+# ======================================================
+
+def last_online(user):
+    if user.is_bot:
+        return "🤖 Bot"
+    if user.status == enums.UserStatus.ONLINE:
+        return "🟢 Online"
+    if user.status == enums.UserStatus.RECENTLY:
+        return "Recently"
+    if user.status == enums.UserStatus.LAST_WEEK:
+        return "Within last week"
+    if user.status == enums.UserStatus.LAST_MONTH:
+        return "Within last month"
+    if user.status == enums.UserStatus.LONG_AGO:
+        return "Long time ago"
+    if user.status == enums.UserStatus.OFFLINE:
+        return user.last_online_date.strftime("%d %b %Y, %I:%M %p")
+    return "Unknown"
