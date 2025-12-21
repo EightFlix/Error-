@@ -1,21 +1,35 @@
 import re
-import math
 import time
+from difflib import SequenceMatcher
 from hydrogram import Client, filters, enums
-from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from info import ADMINS, MAX_BTN, LANGUAGES, QUALITY
+from info import ADMINS
 from database.users_chats_db import db
 from database.ia_filterdb import get_search_results
-from utils import get_settings, get_size, is_premium, temp
+from utils import get_size, is_premium, temp
 
-# ===================== ⚡ SAFE CACHE =====================
-SEARCH_CACHE = {}     # key -> (files, n_offset, total, ts)
-CACHE_TTL = 45        # seconds
+# ================= CONFIG =================
+CACHE_TTL = 45
+FUZZY_THRESHOLD = 0.55
+MAX_RESULTS = 15
 
-RE_CLEAN = re.compile(r"[-:\"';!]")
+SEARCH_CACHE = {}  # key -> (files, ts)
+
+RE_CLEAN = re.compile(r"[.\-_:\"';!]")
 RE_SPACE = re.compile(r"\s+")
+RE_EXT = re.compile(r"\.(mkv|mp4|avi|webm|mov|flv|pdf)$", re.I)
 
-# ===================== 📩 MESSAGE HANDLER =====================
+# ================= HELPERS =================
+def normalize(text: str) -> str:
+    return RE_SPACE.sub(" ", RE_CLEAN.sub(" ", text.lower())).strip()
+
+def clean_name(name: str) -> str:
+    name = re.sub(r'^[a-zA-Z0-9]+>', '', name).strip()
+    return RE_EXT.sub("", name)
+
+def fuzzy(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+# ================= MESSAGE HANDLER =================
 @Client.on_message(filters.text & filters.incoming & (filters.group | filters.private))
 async def filter_handler(client, message):
     if message.text.startswith("/"):
@@ -23,175 +37,71 @@ async def filter_handler(client, message):
 
     user_id = message.from_user.id
 
-    # ---- PM Search permission ----
+    # -------- GROUP SEARCH HARD BLOCK --------
+    if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
+        stg = await db.get_settings(message.chat.id)
+        if stg.get("search") is False:
+            return
+
+    # -------- PM SEARCH PREMIUM CHECK --------
     if message.chat.type == enums.ChatType.PRIVATE:
-        is_prm = await is_premium(user_id, client)
-        if user_id not in ADMINS and not is_prm:
-            stg = db.get_bot_sttgs()
-            if not stg.get("PM_SEARCH", True):
-                return await message.reply_text(
-                    "<b>❌ PM search disabled</b>\n\nOnly premium users can search in PM."
-                )
+        if user_id not in ADMINS:
+            bot_stg = db.get_bot_sttgs()
+            if not bot_stg.get("PM_SEARCH", True):
+                if not await is_premium(user_id, client):
+                    return
 
-    # ---- Clean + normalize search ----
-    search = RE_SPACE.sub(
-        " ",
-        RE_CLEAN.sub(" ", message.text)
-    ).strip().lower()
-
-    if not search or len(search) < 2:
+    search = normalize(message.text)
+    if len(search) < 2:
         return
 
-    await auto_filter(client, message, None, search)
+    await smart_search(client, message, search)
 
-# ===================== 🔎 AUTO FILTER =====================
-async def auto_filter(client, message, reply_msg, search, offset=0, is_edit=False):
-    cache_key = f"{search}:{offset}"
-    cached = SEARCH_CACHE.get(cache_key)
-
-    # ---- CACHE ----
-    if cached and time.time() - cached[3] < CACHE_TTL:
-        files, n_offset, total = cached[:3]
+# ================= SMART SEARCH =================
+async def smart_search(client, message, search):
+    cached = SEARCH_CACHE.get(search)
+    if cached and time.time() - cached[1] < CACHE_TTL:
+        files = cached[0]
     else:
-        files, n_offset, total = await get_search_results(search, offset)
+        files, _, _ = await get_search_results(search)
         if files:
-            SEARCH_CACHE[cache_key] = (files, n_offset, total, time.time())
+            SEARCH_CACHE[search] = (files, time.time())
 
     if not files:
-        return await message.reply_text(f"❌ <b>{search}</b> नहीं मिला")
-
-    req = message.from_user.id
-    short_search = search[:25]
-
-    buttons = []
-
-    # ================= FILE RESULTS (LINK MODE ONLY) =================
-    for file in files:
-        clean_name = re.sub(r'^[a-zA-Z0-9]+>', '', file['file_name']).strip()
-        f_size = get_size(file['file_size'])
-
-        link = f"https://t.me/{temp.U_NAME}?start=file_{message.chat.id}_{file['_id']}"
-
-        buttons.append([
-            InlineKeyboardButton(
-                f"📁 [{f_size}] {clean_name}",
-                url=link
-            )
-        ])
-
-    # ================= PAGINATION =================
-    page_btn = []
-
-    if offset > 0:
-        page_btn.append(
-            InlineKeyboardButton(
-                "« BACK",
-                callback_data=f"next_{req}_{offset-MAX_BTN}_{short_search}"
-            )
+        return await message.reply_text(
+            f"❌ <b>No results found for:</b>\n<code>{search}</code>",
+            parse_mode=enums.ParseMode.HTML
         )
 
-    page_btn.append(
-        InlineKeyboardButton(
-            f"{offset//MAX_BTN + 1}/{math.ceil(total/MAX_BTN)}",
-            callback_data="pages"
+    scored = []
+    for f in files:
+        score = fuzzy(search, normalize(f["file_name"]))
+        if score >= FUZZY_THRESHOLD:
+            scored.append((score, f))
+
+    if not scored:
+        return await message.reply_text(
+            f"❌ <b>No close match found for:</b>\n<code>{search}</code>",
+            parse_mode=enums.ParseMode.HTML
         )
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    scored = scored[:MAX_RESULTS]
+
+    text = (
+        f"<b>♻️ Smart Results</b>\n"
+        f"<code>{search}</code>\n\n"
     )
 
-    if n_offset:
-        page_btn.append(
-            InlineKeyboardButton(
-                "NEXT »",
-                callback_data=f"next_{req}_{n_offset}_{short_search}"
-            )
-        )
+    for _, f in scored:
+        name = clean_name(f["file_name"])
+        size = get_size(f["file_size"])
+        link = f"https://t.me/{temp.U_NAME}?start=file_{message.chat.id}_{f['_id']}"
+        text += f"📁 <a href='{link}'>[{size}] {name}</a>\n"
 
-    buttons.append(page_btn)
-
-    # ================= FILTER BUTTONS =================
-    buttons.insert(0, [
-        InlineKeyboardButton("🌐 LANGUAGE", callback_data=f"filter_menu#lang#{req}#{offset}#{short_search}"),
-        InlineKeyboardButton("🔍 QUALITY", callback_data=f"filter_menu#qual#{req}#{offset}#{short_search}")
-    ])
-
-    caption = (
-        f"<b>HEY 👋</b>\n"
-        f"♻️ Here I found results for:\n"
-        f"<code>{search}</code>"
+    await message.reply_text(
+        text,
+        disable_web_page_preview=True,
+        parse_mode=enums.ParseMode.HTML,
+        quote=True
     )
-
-    if is_edit:
-        await reply_msg.edit_text(
-            caption,
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-    else:
-        await message.reply_text(
-            caption,
-            reply_markup=InlineKeyboardMarkup(buttons),
-            quote=True
-        )
-
-# ===================== 🔁 CALLBACK HANDLER =====================
-@Client.on_callback_query(filters.regex(r"^(next|filter_menu|apply_filter)"))
-async def cb_handler(client, query):
-    data = query.data
-
-    if data.startswith("next"):
-        _, req, offset, search = data.split("_")
-        if int(req) != query.from_user.id:
-            return await query.answer("❌ Not for you", show_alert=True)
-
-        await auto_filter(
-            client,
-            query.message.reply_to_message,
-            query.message,
-            search,
-            int(offset),
-            True
-        )
-
-    elif data.startswith("filter_menu"):
-        _, ftype, req, offset, search = data.split("#")
-        items = LANGUAGES if ftype == "lang" else QUALITY
-        btn = []
-
-        for i in range(0, len(items), 2):
-            row = [
-                InlineKeyboardButton(
-                    items[i].title(),
-                    callback_data=f"apply_filter#{items[i]}#{search}#{offset}#{req}"
-                )
-            ]
-            if i + 1 < len(items):
-                row.append(
-                    InlineKeyboardButton(
-                        items[i + 1].title(),
-                        callback_data=f"apply_filter#{items[i + 1]}#{search}#{offset}#{req}"
-                    )
-                )
-            btn.append(row)
-
-        btn.append([
-            InlineKeyboardButton("⪻ BACK", callback_data=f"next_{req}_{offset}_{search}")
-        ])
-
-        await query.message.edit_text(
-            f"<b>Select {ftype.title()}</b>",
-            reply_markup=InlineKeyboardMarkup(btn)
-        )
-
-    elif data.startswith("apply_filter"):
-        _, choice, search, offset, req = data.split("#")
-        if int(req) != query.from_user.id:
-            return await query.answer("❌ Not for you", show_alert=True)
-
-        await auto_filter(
-            client,
-            query.message.reply_to_message,
-            query.message,
-            f"{search} {choice}",
-            0,
-            True
-        )
-
-    await query.answer()
