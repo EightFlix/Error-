@@ -1,68 +1,164 @@
 import os
 import aiohttp
 import asyncio
+import time
 from hydrogram import Client, filters
-from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from utils import temp
+from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from info import ADMINS
+from utils import temp, is_premium
 
-# API URLs
-CATBOX_URL = "https://catbox.moe/user/api.php"
-LITTERBOX_URL = "https://litterbox.catbox.moe/resources/internals/api.php"
+# =========================
+# GLOBAL STATE (LIGHT)
+# =========================
+UPLOAD_QUEUE = asyncio.Lock()
+UPLOAD_PANEL = {}   # user_id -> state
 
-@Client.on_message(filters.command(['gofile', 'go']) & filters.private)
-async def gofile_handler(bot, message):
-    """GoFile: Updated API Fix (24h Expiry)"""
-    if not message.reply_to_message:
-        return await message.reply("<b>❌ कृपया फाइल पर रिप्लाई करें।</b>")
-    
-    msg = await message.reply("<b>⚡ GoFile (New API) पर अपलोड हो रहा है...</b>")
-    path = await message.reply_to_message.download()
-    
+GOFILE_API = "https://store1.gofile.io/contents/uploadfile"
+
+# =========================
+# HELPERS
+# =========================
+
+def panel_buttons(state):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"🔒 Private {'✅' if state['private'] else '❌'}",
+                callback_data="up#private"
+            ),
+            InlineKeyboardButton(
+                f"🔁 Mirror {'✅' if state['mirror'] else '❌'}",
+                callback_data="up#mirror"
+            )
+        ],
+        [
+            InlineKeyboardButton("🗑 Auto Delete 10m", callback_data="up#del#600"),
+            InlineKeyboardButton("🗑 Auto Delete 30m", callback_data="up#del#1800")
+        ],
+        [
+            InlineKeyboardButton("🚀 Start Upload", callback_data="up#start"),
+            InlineKeyboardButton("❌ Cancel", callback_data="up#cancel")
+        ]
+    ])
+
+async def delete_after(bot, chat_id, msg_id, delay):
+    await asyncio.sleep(delay)
     try:
-        async with aiohttp.ClientSession() as session:
-            # GoFile New API: अब सीधा store1.gofile.io या उपलब्ध सर्वर का उपयोग करें
-            data = aiohttp.FormData()
-            data.add_field('file', open(path, 'rb'))
-            
-            # नई API के अनुसार अपलोड रिक्वेस्ट
-            async with session.post('https://store1.gofile.io/contents/uploadfile', data=data) as r:
-                res = await r.json()
-                
-                if res.get('status') == 'ok':
-                    link = res['data']['downloadPage']
-                    await msg.edit(f"<b>✅ ɢᴏғɪʟᴇ ʟɪɴᴋ (Updated):\n\n<code>{link}</code></b>")
-                else:
-                    await msg.edit(f"<b>❌ GoFile एरर: {res.get('status')}</b>")
-    except Exception as e:
-        await msg.edit(f"<b>❌ GoFile सिस्टम एरर: {e}</b>")
-    finally:
-        if os.path.exists(path): os.remove(path)
+        await bot.delete_messages(chat_id, msg_id)
+    except:
+        pass
 
-@Client.on_message(filters.command('trans') & filters.private)
-async def transfer_sh_handler(bot, message):
-    """Transfer.sh: Fix with Timeout (10GB Limit)"""
-    if not message.reply_to_message:
-        return await message.reply("<b>❌ फाइल पर रिप्लाई करें।</b>")
-    
-    msg = await message.reply("<b>⚡ Transfer.sh पर अपलोड हो रहा है (Max 10GB)...</b>")
-    path = await message.reply_to_message.download()
-    file_name = os.path.basename(path)
-    
-    # बड़ी फाइलों के लिए अधिक समय (Timeout) देना ज़रूरी है
-    timeout = aiohttp.ClientTimeout(total=1800) # 30 मिनट
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            with open(path, 'rb') as f:
-                async with session.put(f'https://transfer.sh/{file_name}', data=f) as r:
-                    if r.status == 200:
-                        link = await r.text()
-                        await msg.edit(f"<b>✅ ᴛʀᴀɴsғᴇʀ.sʜ ʟɪɴᴋ:\n\n<code>{link.strip()}</code></b>")
-                    else:
-                        await msg.edit(f"<b>❌ Transfer.sh व्यस्त है (Status: {r.status})। बाद में प्रयास करें।</b>")
-    except Exception as e:
-        await msg.edit(f"<b>❌ Transfer.sh एरर: {e}</b>")
-    finally:
-        if os.path.exists(path): os.remove(path)
+# =========================
+# ADMIN UPLOAD PANEL
+# =========================
 
-# पुराने वर्किंग कमांड्स (/ct, /lt, /graph) को वैसे ही रहने दें...
+@Client.on_message(filters.command("upload") & filters.private)
+async def upload_panel(bot, message):
+    uid = message.from_user.id
 
+    if uid not in ADMINS and not await is_premium(uid, bot):
+        return await message.reply("❌ Uploads are Premium-only.")
+
+    UPLOAD_PANEL[uid] = {
+        "private": False,
+        "mirror": False,
+        "delete": 0
+    }
+
+    await message.reply(
+        "📤 **Admin Upload Panel**\n\n"
+        "Reply to a file, configure options, then start upload.",
+        reply_markup=panel_buttons(UPLOAD_PANEL[uid])
+    )
+
+@Client.on_callback_query(filters.regex("^up#"))
+async def upload_panel_cb(bot, query: CallbackQuery):
+    uid = query.from_user.id
+    if uid not in UPLOAD_PANEL:
+        return await query.answer("Session expired", show_alert=True)
+
+    state = UPLOAD_PANEL[uid]
+    data = query.data.split("#")
+
+    if data[1] == "private":
+        state["private"] = not state["private"]
+
+    elif data[1] == "mirror":
+        state["mirror"] = not state["mirror"]
+
+    elif data[1] == "del":
+        state["delete"] = int(data[2])
+
+    elif data[1] == "cancel":
+        UPLOAD_PANEL.pop(uid, None)
+        return await query.message.edit("❌ Upload cancelled.")
+
+    elif data[1] == "start":
+        if not query.message.reply_to_message:
+            return await query.answer("Reply to a file first", show_alert=True)
+
+        await query.message.edit("⏳ Upload queued...")
+        asyncio.create_task(start_upload(bot, query, state))
+        return
+
+    await query.message.edit_reply_markup(
+        reply_markup=panel_buttons(state)
+    )
+    await query.answer()
+
+# =========================
+# UPLOAD LOGIC
+# =========================
+
+async def start_upload(bot, query: CallbackQuery, state):
+    async with UPLOAD_QUEUE:
+        msg = query.message
+        reply = msg.reply_to_message
+        path = await reply.download()
+
+        status = await msg.edit("⚡ Uploading to GoFile...")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                data = aiohttp.FormData()
+                data.add_field("file", open(path, "rb"))
+
+                async with session.post(GOFILE_API, data=data) as r:
+                    res = await r.json()
+
+            if res.get("status") != "ok":
+                return await status.edit("❌ Upload failed.")
+
+            link = res["data"]["downloadPage"]
+
+            # MIRROR (optional)
+            if state["mirror"]:
+                status = await status.edit("🔁 Mirroring to Transfer.sh...")
+                async with aiohttp.ClientSession() as session:
+                    with open(path, "rb") as f:
+                        async with session.put(
+                            f"https://transfer.sh/{os.path.basename(path)}",
+                            data=f
+                        ) as r:
+                            if r.status == 200:
+                                mirror = (await r.text()).strip()
+                                link += f"\n\n🔁 Mirror:\n{mirror}"
+
+            final = await status.edit(
+                f"✅ **Upload Complete**\n\n<code>{link}</code>",
+                disable_web_page_preview=True
+            )
+
+            # AUTO DELETE
+            if state["delete"]:
+                asyncio.create_task(
+                    delete_after(bot, final.chat.id, final.id, state["delete"])
+                )
+
+        except Exception as e:
+            await status.edit(f"❌ Error: {e}")
+
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+            UPLOAD_PANEL.pop(query.from_user.id, None)
