@@ -25,7 +25,7 @@ from shortzy import Shortzy
 
 
 # ======================================================
-# 🧠 TEMP RUNTIME CACHE
+# 🧠 TEMP RUNTIME CACHE (GLOBAL STATE)
 # ======================================================
 
 class temp(object):
@@ -41,25 +41,35 @@ class temp(object):
     BANNED_USERS = []
     BANNED_CHATS = []
 
-    # index / broadcast
+    # index / broadcast flags
     CANCEL = False
     USERS_CANCEL = False
     GROUPS_CANCEL = False
 
-    # caches
+    # runtime caches
     SETTINGS = {}
     VERIFICATIONS = {}
     FILES = {}
 
-    # premium cache (light)
+    # premium cache
     PREMIUM = {}
+
+    # 🔥 INDEX LIVE STATS (ADMIN DASHBOARD USES THIS)
+    INDEX_STATS = {
+        "running": False,
+        "start": 0,
+        "scanned": 0,
+        "saved": 0,
+        "dup": 0,
+        "err": 0
+    }
 
 
 # ======================================================
 # 👑 PREMIUM CORE CONFIG
 # ======================================================
 
-GRACE_PERIOD = timedelta(minutes=20)  # hidden grace window
+GRACE_PERIOD = timedelta(minutes=20)
 
 
 # ======================================================
@@ -133,7 +143,6 @@ async def update_verify_status(user_id, **kwargs):
 # ======================================================
 
 async def is_premium(user_id, bot=None) -> bool:
-    # admin OR global off
     if not IS_PREMIUM or user_id in ADMINS:
         return True
 
@@ -150,11 +159,9 @@ async def is_premium(user_id, bot=None) -> bool:
 
     now = datetime.utcnow()
 
-    # grace window
     if now <= expire + GRACE_PERIOD:
         return True
 
-    # hard expiry cleanup
     mp.update({
         "premium": False,
         "plan": "",
@@ -195,11 +202,10 @@ async def check_premium(bot):
                         "expire": ""
                     })
                     db.update_plan(uid, mp)
-
         except:
             pass
 
-        await asyncio.sleep(1800)  # 30 min
+        await asyncio.sleep(1800)
 
 
 # ======================================================
@@ -251,7 +257,6 @@ def get_size(size):
 
 
 async def get_shortlink(url, api, link):
-    # SAFE fallback
     if not api or not url:
         return link
     shortzy = Shortzy(api_key=api, base_site=url)
