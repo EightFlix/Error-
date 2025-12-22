@@ -28,15 +28,15 @@ from utils import (
 
 GRACE_PERIOD = timedelta(minutes=30)
 
-# temp memory init
+# runtime memory
 if not hasattr(temp, "FILES"):
     temp.FILES = {}
 
 # ======================================================
-# 🧠 PREMIUM CHECK (SAFE)
+# 🧠 PREMIUM CHECK
 # ======================================================
 
-async def has_premium_or_grace(user_id, bot):
+async def has_premium_or_grace(user_id):
     if user_id in ADMINS:
         return True
 
@@ -69,7 +69,10 @@ async def countdown_task(user_id, seconds):
             if not data:
                 return
 
-            notice = data["notice"]
+            notice = data.get("notice")
+            if not notice:
+                return
+
             try:
                 await notice.edit(
                     f"⚠️ File will be deleted in {get_readable_time(seconds)}"
@@ -83,11 +86,11 @@ async def countdown_task(user_id, seconds):
 
 
 # ======================================================
-# 📦 FILE DELIVERY (GROUP BUTTON)
+# 📦 FILE BUTTON (GROUP)
 # ======================================================
 
 @Client.on_callback_query(filters.regex(r"^file#"))
-async def file_delivery_handler(client: Client, query: CallbackQuery):
+async def file_button_handler(client: Client, query: CallbackQuery):
     _, file_id = query.data.split("#", 1)
 
     file = await get_file_details(file_id)
@@ -97,8 +100,9 @@ async def file_delivery_handler(client: Client, query: CallbackQuery):
     settings = await get_settings(query.message.chat.id)
     uid = query.from_user.id
 
-    premium_ok = await has_premium_or_grace(uid, client)
+    premium_ok = await has_premium_or_grace(uid)
 
+    # free user → shortlink
     if settings.get("shortlink") and not premium_ok:
         link = await get_shortlink(
             settings.get("url"),
@@ -123,11 +127,11 @@ async def file_delivery_handler(client: Client, query: CallbackQuery):
 
 
 # ======================================================
-# 📩 START HANDLER (PM DELIVERY)
+# 📩 /start FILE DELIVERY (PM)
 # ======================================================
 
 @Client.on_message(filters.command("start") & filters.private)
-async def start_handler(client, message):
+async def start_file_delivery(client, message):
     if len(message.command) < 2:
         return
 
@@ -148,7 +152,7 @@ async def start_handler(client, message):
     settings = await get_settings(grp_id)
     uid = message.from_user.id
 
-    premium_ok = await has_premium_or_grace(uid, client)
+    premium_ok = await has_premium_or_grace(uid)
 
     if settings.get("shortlink") and not premium_ok:
         return await message.reply(
@@ -158,6 +162,7 @@ async def start_handler(client, message):
             ])
         )
 
+    # ---------- SAFE CAPTION ----------
     caption_tpl = settings.get("caption") or "{file_name}\n\n{file_caption}"
     caption = caption_tpl.format(
         file_name=file.get("file_name", "File"),
@@ -184,20 +189,24 @@ async def start_handler(client, message):
         f"⚠️ File will be deleted in {get_readable_time(PM_FILE_DELETE_TIME)}"
     )
 
-    # delete /start message
+    # 🔥 auto delete /start message
     try:
         await message.delete()
     except:
         pass
 
+    # start countdown
     task = asyncio.create_task(countdown_task(uid, PM_FILE_DELETE_TIME))
 
     temp.FILES[uid] = {
+        "owner": uid,
+        "file_id": file_id,
         "file": sent,
         "notice": notice,
         "task": task
     }
 
+    # final delete
     await asyncio.sleep(PM_FILE_DELETE_TIME)
 
     data = temp.FILES.pop(uid, None)
