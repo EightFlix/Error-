@@ -8,7 +8,7 @@ from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Callback
 from info import IS_STREAM, PM_FILE_DELETE_TIME, PROTECT_CONTENT, ADMINS
 from database.ia_filterdb import get_file_details
 from database.users_chats_db import db
-from utils import get_settings, get_size, get_shortlink, temp
+from utils import get_settings, get_shortlink, temp
 
 
 # ======================================================
@@ -17,6 +17,22 @@ from utils import get_settings, get_size, get_shortlink, temp
 
 GRACE_PERIOD = timedelta(minutes=30)
 RESEND_EXPIRE_TIME = 60  # seconds
+
+
+# ======================================================
+# 🧠 RUNTIME DELIVERY STATE
+# ======================================================
+
+if not hasattr(temp, "ACTIVE_DELIVERY"):
+    temp.ACTIVE_DELIVERY = set()
+
+if not hasattr(temp, "DELIVERY_STATS"):
+    temp.DELIVERY_STATS = {
+        "total": 0,
+        "admin": 0,
+        "user": 0,
+        "active": 0
+    }
 
 
 # ======================================================
@@ -53,6 +69,7 @@ async def file_button_handler(client: Client, query: CallbackQuery):
     settings = await get_settings(query.message.chat.id)
     uid = query.from_user.id
 
+    # ---- FREE USER → SHORTLINK ----
     if settings.get("shortlink") and not await has_premium_or_grace(uid):
         link = await get_shortlink(
             settings.get("url"),
@@ -60,14 +77,14 @@ async def file_button_handler(client: Client, query: CallbackQuery):
             f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}"
         )
         return await query.message.reply_text(
-            f"<b>📁 {file['file_name']}</b>\n"
-            f"📦 <b>Size:</b> {get_size(file['file_size'])}",
+            f"<b>{file['file_name']}</b>",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚀 Get File", url=link)],
                 [InlineKeyboardButton("❌ Close", callback_data="close_data")]
             ])
         )
 
+    # ---- PREMIUM / ADMIN ----
     await query.answer(
         url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}"
     )
@@ -85,17 +102,28 @@ async def start_file_delivery(client: Client, message):
     except:
         return
 
-    # ✅ DELETE /start FIRST (GUARANTEED)
-    try:
-        await message.delete()
-    except:
-        pass
+    uid = message.from_user.id
 
-    await deliver_file(client, message.from_user.id, grp_id, file_id)
+    # 🔥 USER QUEUE LOCK (ADMIN BYPASS)
+    if uid not in ADMINS and uid in temp.ACTIVE_DELIVERY:
+        await message.reply("⏳ Please wait, your previous file is processing")
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+
+    try:
+        await deliver_file(client, uid, grp_id, file_id)
+    finally:
+        try:
+            await message.delete()  # 🔥 ALWAYS DELETE /start
+        except:
+            pass
 
 
 # ======================================================
-# 🚚 CORE DELIVERY
+# 🚚 CORE DELIVERY ENGINE
 # ======================================================
 
 async def deliver_file(client, uid, grp_id, file_id):
@@ -103,83 +131,95 @@ async def deliver_file(client, uid, grp_id, file_id):
     if not file:
         return
 
-    settings = await get_settings(grp_id)
-    if settings.get("shortlink") and not await has_premium_or_grace(uid):
-        return
+    # ---- LOCK (USER ONLY) ----
+    is_admin = uid in ADMINS
+    if not is_admin:
+        temp.ACTIVE_DELIVERY.add(uid)
 
-    # ==================================================
-    # 🔥 CLEAN OLD FILE (ONE ACTIVE ONLY)
-    # ==================================================
-    for k, v in list(temp.FILES.items()):
-        if v.get("owner") == uid:
+    temp.DELIVERY_STATS["active"] += 1
+
+    try:
+        settings = await get_settings(grp_id)
+
+        if settings.get("shortlink") and not await has_premium_or_grace(uid):
+            return
+
+        # ---- CLEAN OLD FILES (SAME USER) ----
+        for k, v in list(temp.FILES.items()):
+            if v.get("owner") == uid:
+                try:
+                    await v["file"].delete()
+                except:
+                    pass
+                temp.FILES.pop(k, None)
+
+        # ---- CLEAN CAPTION (NO DUPLICATE) ----
+        caption_tpl = settings.get("caption") or "{file_name}\n\n{file_caption}"
+        caption = caption_tpl.format(
+            file_name=file.get("file_name", "File"),
+            file_caption=file.get("caption", "")
+        )
+
+        buttons = []
+        if IS_STREAM:
+            buttons.append([
+                InlineKeyboardButton("▶️ Watch / Download", callback_data=f"stream#{file_id}")
+            ])
+        buttons.append([
+            InlineKeyboardButton("❌ Close", callback_data="close_data")
+        ])
+
+        sent = await client.send_cached_media(
+            chat_id=uid,
+            file_id=file_id,
+            caption=caption,
+            protect_content=PROTECT_CONTENT,
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+        # ---- STATS ----
+        temp.DELIVERY_STATS["total"] += 1
+        if is_admin:
+            temp.DELIVERY_STATS["admin"] += 1
+        else:
+            temp.DELIVERY_STATS["user"] += 1
+
+        temp.FILES[sent.id] = {
+            "owner": uid,
+            "file": sent,
+            "expire": int(time.time()) + PM_FILE_DELETE_TIME
+        }
+
+        # ---- AUTO DELETE (SILENT) ----
+        await asyncio.sleep(PM_FILE_DELETE_TIME)
+
+        data = temp.FILES.pop(sent.id, None)
+        if data:
             try:
-                await v["file"].delete()
+                await sent.delete()
             except:
                 pass
-            temp.FILES.pop(k, None)
 
-    # ==================================================
-    # 📄 CLEAN CAPTION (NO DUPLICATE)
-    # ==================================================
-    caption_tpl = settings.get("caption") or "{file_name}\n\n{file_caption}"
-    base_caption = caption_tpl.format(
-        file_name=file.get("file_name", "File"),
-        file_caption=file.get("caption", "")
-    )
-
-    buttons = []
-    if IS_STREAM:
-        buttons.append(
-            [InlineKeyboardButton("▶️ Watch / Download", callback_data=f"stream#{file_id}")]
+        # ---- RESEND BUTTON ----
+        resend = await client.send_message(
+            uid,
+            "⌛ <b>File expired</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔁 Resend File", callback_data=f"resend#{file_id}")]
+            ])
         )
-    buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_data")])
 
-    markup = InlineKeyboardMarkup(buttons)
+        await asyncio.sleep(RESEND_EXPIRE_TIME)
+        try:
+            await resend.delete()
+        except:
+            pass
 
-    sent = await client.send_cached_media(
-        chat_id=uid,
-        file_id=file_id,
-        caption=base_caption,   # ✅ ONLY ONCE
-        protect_content=PROTECT_CONTENT,
-        reply_markup=markup
-    )
-
-    temp.FILES[sent.id] = {
-        "owner": uid,
-        "file": sent,
-        "expire": int(time.time()) + PM_FILE_DELETE_TIME
-    }
-
-    # ==================================================
-    # 🗑 SILENT AUTO DELETE (NO EDIT)
-    # ==================================================
-    await asyncio.sleep(PM_FILE_DELETE_TIME)
-
-    data = temp.FILES.pop(sent.id, None)
-    if not data:
-        return
-
-    try:
-        await sent.delete()
-    except:
-        pass
-
-    # ==================================================
-    # 🔁 RESEND (TEMP)
-    # ==================================================
-    resend = await client.send_message(
-        uid,
-        "⌛ <b>File expired</b>",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔁 Resend File", callback_data=f"resend#{file_id}")]
-        ])
-    )
-
-    await asyncio.sleep(RESEND_EXPIRE_TIME)
-    try:
-        await resend.delete()
-    except:
-        pass
+    finally:
+        # ---- UNLOCK ----
+        if not is_admin:
+            temp.ACTIVE_DELIVERY.discard(uid)
+        temp.DELIVERY_STATS["active"] -= 1
 
 
 # ======================================================
@@ -197,4 +237,7 @@ async def resend_handler(client, query: CallbackQuery):
     except:
         pass
 
-    await deliver_file(client, uid, query.message.chat.id, file_id)
+    if uid not in ADMINS and uid in temp.ACTIVE_DELIVERY:
+        return
+
+    await deliver_file(client, uid, 0, file_id)
