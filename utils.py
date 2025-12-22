@@ -2,15 +2,16 @@ import asyncio
 import pytz
 import qrcode
 import time
+import re
 from io import BytesIO
 from datetime import datetime, timedelta
+from difflib import get_close_matches
 
 from hydrogram.errors import UserNotParticipant, FloodWait
 from hydrogram.types import InlineKeyboardButton
 
 from info import ADMINS, IS_PREMIUM, TIME_ZONE
 
-# ---- OPTIONAL SHORTLINK CONFIG ----
 try:
     from info import SHORTLINK_API, SHORTLINK_URL
 except ImportError:
@@ -29,39 +30,24 @@ class temp(object):
     START_TIME = 0
     BOT = None
 
-    # bot info
     ME = None
     U_NAME = None
     B_NAME = None
 
-    # moderation
     BANNED_USERS = set()
     BANNED_CHATS = set()
 
-    # broadcast flags
     CANCEL = False
     USERS_CANCEL = False
     GROUPS_CANCEL = False
 
-    # cached data
     SETTINGS = {}
     VERIFICATIONS = {}
 
-    # 🔥 FILE DELIVERY MEMORY (msg_id → data)
-    # {
-    #   msg_id: {
-    #       "owner": user_id,
-    #       "file": Message,
-    #       "task": asyncio.Task,
-    #       "expire": unix_time
-    #   }
-    # }
     FILES = {}
 
-    # premium cache (optional)
     PREMIUM = {}
 
-    # 🔥 LIVE INDEX STATS (ADMIN DASHBOARD)
     INDEX_STATS = {
         "running": False,
         "start": 0,
@@ -70,6 +56,9 @@ class temp(object):
         "dup": 0,
         "err": 0
     }
+
+    # 🔥 SMART SEARCH MEMORY (RUNTIME ONLY)
+    SEARCH_MEMORY = set()
 
 
 # ======================================================
@@ -80,38 +69,87 @@ GRACE_PERIOD = timedelta(minutes=20)
 
 
 # ======================================================
-# 🔁 MEMORY LEAK GUARD (FILES AUTO CLEAN)
+# 🔁 MEMORY LEAK GUARD
 # ======================================================
 
 async def cleanup_files_memory():
-    """
-    Periodically cleans expired temp.FILES entries
-    Prevents memory leak in PM file delivery
-    """
     while True:
         try:
             now = int(time.time())
-            expired_keys = [
+            expired = [
                 k for k, v in temp.FILES.items()
                 if v.get("expire", 0) <= now
             ]
-
-            for k in expired_keys:
+            for k in expired:
                 data = temp.FILES.pop(k, None)
-                if not data:
-                    continue
-
-                # cancel countdown task safely
-                try:
-                    if data.get("task"):
-                        data["task"].cancel()
-                except:
-                    pass
-
-        except Exception:
+                if data and data.get("task"):
+                    data["task"].cancel()
+        except:
             pass
-
         await asyncio.sleep(60)
+
+
+# ======================================================
+# 🔍 SMART SEARCH ENGINE (FAST)
+# ======================================================
+
+_HINDI_MAP = {
+    "aa": "a", "ee": "i", "oo": "u",
+    "ph": "f", "bh": "b", "sh": "s",
+    "ch": "c", "kh": "k", "gh": "g"
+}
+
+_STOP_WORDS = {"the", "is", "of", "and", "to", "ka", "ki", "ke"}
+
+
+def normalize_query(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+
+    for k, v in _HINDI_MAP.items():
+        text = text.replace(k, v)
+
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def split_keywords(text: str):
+    return [
+        w for w in text.split()
+        if len(w) > 1 and w not in _STOP_WORDS
+    ]
+
+
+def prefix_match(word: str):
+    return {word[:i] for i in range(2, min(len(word) + 1, 7))}
+
+
+def smart_variants(query: str):
+    """
+    Returns set of smart variants
+    """
+    norm = normalize_query(query)
+    words = split_keywords(norm)
+
+    variants = set(words)
+
+    for w in words:
+        variants |= prefix_match(w)
+        close = get_close_matches(w, temp.SEARCH_MEMORY, n=2, cutoff=0.85)
+        variants |= set(close)
+
+    temp.SEARCH_MEMORY |= set(words)
+    return list(variants)
+
+
+def smart_search_tokens(query: str):
+    """
+    Main entry for filter.py
+    """
+    tokens = smart_variants(query)
+
+    # ensure original query is first (FAST PATH)
+    return [query] + [t for t in tokens if t != query]
 
 
 # ======================================================
@@ -163,24 +201,7 @@ async def is_subscribed(bot, query):
 
 
 # ======================================================
-# ✅ VERIFY SYSTEM
-# ======================================================
-
-async def get_verify_status(user_id):
-    if user_id not in temp.VERIFICATIONS:
-        temp.VERIFICATIONS[user_id] = await db.get_verify_status(user_id)
-    return temp.VERIFICATIONS[user_id]
-
-
-async def update_verify_status(user_id, **kwargs):
-    verify = await get_verify_status(user_id)
-    verify.update(kwargs)
-    temp.VERIFICATIONS[user_id] = verify
-    await db.update_verify_status(user_id, verify)
-
-
-# ======================================================
-# 👑 PREMIUM CHECK (SINGLE SOURCE)
+# 👑 PREMIUM CHECK
 # ======================================================
 
 async def is_premium(user_id, bot=None) -> bool:
@@ -201,7 +222,6 @@ async def is_premium(user_id, bot=None) -> bool:
     if datetime.utcnow() <= expire + GRACE_PERIOD:
         return True
 
-    # auto downgrade
     plan.update({
         "premium": False,
         "expire": "",
@@ -213,76 +233,7 @@ async def is_premium(user_id, bot=None) -> bool:
 
 
 # ======================================================
-# 🛡 PREMIUM WATCHER (BACKGROUND)
-# ======================================================
-
-async def check_premium(bot):
-    while True:
-        try:
-            now = datetime.utcnow()
-            for u in db.get_premium_users():
-                uid = u["id"]
-                if uid in ADMINS:
-                    continue
-
-                plan = u.get("plan", {})
-                expire = plan.get("expire")
-                if not expire:
-                    continue
-
-                if isinstance(expire, (int, float)):
-                    expire = datetime.utcfromtimestamp(expire)
-
-                if now > expire + GRACE_PERIOD:
-                    plan.update({
-                        "premium": False,
-                        "expire": "",
-                        "plan": ""
-                    })
-                    db.update_plan(uid, plan)
-        except:
-            pass
-
-        await asyncio.sleep(1800)  # 30 min
-
-
-# ======================================================
-# 📢 BROADCAST HELPERS
-# ======================================================
-
-async def broadcast_messages(user_id, message, pin=False):
-    try:
-        msg = await message.copy(chat_id=user_id)
-        if pin:
-            await msg.pin(both_sides=True)
-        return "Success"
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        return await broadcast_messages(user_id, message, pin)
-    except:
-        await db.delete_user(int(user_id))
-        return "Error"
-
-
-async def groups_broadcast_messages(chat_id, message, pin=False):
-    try:
-        msg = await message.copy(chat_id=chat_id)
-        if pin:
-            try:
-                await msg.pin()
-            except:
-                pass
-        return "Success"
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        return await groups_broadcast_messages(chat_id, message, pin)
-    except:
-        await db.delete_chat(chat_id)
-        return "Error"
-
-
-# ======================================================
-# 🧰 SMALL UTILITIES
+# 🧰 UTILITIES (UNCHANGED)
 # ======================================================
 
 def get_size(size):
