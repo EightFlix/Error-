@@ -28,7 +28,7 @@ from utils import (
 
 GRACE_PERIOD = timedelta(minutes=30)
 
-# make sure FILES exists
+# ensure runtime memory
 if not hasattr(temp, "FILES"):
     temp.FILES = {}
 
@@ -57,10 +57,10 @@ async def has_premium_or_grace(user_id):
 
 
 # ======================================================
-# ⏱ COUNTDOWN TASK (PER FILE)
+# ⏱ COUNTDOWN TASK (SAFE)
 # ======================================================
 
-async def countdown_task(msg_id, seconds):
+async def countdown_task(msg_id: int, seconds: int):
     try:
         while seconds > 0:
             await asyncio.sleep(60)
@@ -103,7 +103,7 @@ async def file_button_handler(client: Client, query: CallbackQuery):
 
     premium_ok = await has_premium_or_grace(uid)
 
-    # free → shortlink
+    # ---- FREE → SHORTLINK ----
     if settings.get("shortlink") and not premium_ok:
         link = await get_shortlink(
             settings.get("url"),
@@ -163,6 +163,26 @@ async def start_file_delivery(client, message):
             ])
         )
 
+    # ==================================================
+    # 🔥 CLEAN OLD SESSION (IMPORTANT FIX)
+    # ==================================================
+    for k, old in list(temp.FILES.items()):
+        if old.get("owner") == uid:
+            try:
+                old["task"].cancel()
+            except:
+                pass
+            try:
+                await old["file"].delete()
+            except:
+                pass
+            try:
+                await old["notice"].delete()
+            except:
+                pass
+            temp.FILES.pop(k, None)
+
+    # ---------- CAPTION ----------
     caption_tpl = settings.get("caption") or "{file_name}\n\n{file_caption}"
     caption = caption_tpl.format(
         file_name=file.get("file_name", "File"),
@@ -189,7 +209,7 @@ async def start_file_delivery(client, message):
         f"⚠️ File will be deleted in {get_readable_time(PM_FILE_DELETE_TIME)}"
     )
 
-    # delete /start command
+    # auto delete /start command
     try:
         await message.delete()
     except:
@@ -199,7 +219,9 @@ async def start_file_delivery(client, message):
         countdown_task(sent.id, PM_FILE_DELETE_TIME)
     )
 
+    # ==================================================
     # 🔐 PER-FILE OWNERSHIP MEMORY
+    # ==================================================
     temp.FILES[sent.id] = {
         "owner": uid,
         "file_id": file_id,
@@ -208,7 +230,9 @@ async def start_file_delivery(client, message):
         "task": task
     }
 
-    # final delete
+    # ==================================================
+    # 🗑 FINAL DELETE
+    # ==================================================
     await asyncio.sleep(PM_FILE_DELETE_TIME)
 
     data = temp.FILES.pop(sent.id, None)
