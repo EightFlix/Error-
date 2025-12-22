@@ -1,5 +1,6 @@
 import asyncio
 import time
+import logging
 from datetime import datetime, timedelta
 
 from hydrogram import Client, filters
@@ -12,13 +13,20 @@ from utils import get_settings, get_size, get_shortlink, temp
 
 
 # ======================================================
+# LOGGING
+# ======================================================
+
+logger = logging.getLogger(__name__)
+
+
+# ======================================================
 # CONFIG
 # ======================================================
 
 GRACE_PERIOD = timedelta(minutes=30)
 RESEND_EXPIRE_TIME = 60  # seconds
 
-# Track active async tasks
+# Track active deletion tasks
 active_tasks = {}
 
 
@@ -91,56 +99,64 @@ async def start_file_delivery(client: Client, message):
     try:
         _, grp_id, file_id = message.text.split("_", 2)
         grp_id = int(grp_id)
-    except:
+    except Exception as e:
         return
 
-    # cancel previous task (per user)
+    # Cancel previous file task for this user (optional - limits to 1 file at a time)
     user_task_key = f"user_{message.from_user.id}"
     if user_task_key in active_tasks:
         active_tasks[user_task_key].cancel()
 
+    # Create new task and track it
     task = asyncio.create_task(
         deliver_file(client, message.from_user.id, grp_id, file_id)
     )
     active_tasks[user_task_key] = task
 
+    # Clean up task reference when done
     def cleanup_task(t):
         active_tasks.pop(user_task_key, None)
-
+    
     task.add_done_callback(cleanup_task)
 
-    # always delete /start
+    # 🔥 ALWAYS DELETE /start
     try:
         await message.delete()
-    except:
+    except Exception as e:
         pass
 
 
 # ======================================================
-# AUTO DELETE TASK (SEPARATE)
+# AUTO DELETE TASK (SEPARATE FROM DELIVERY)
 # ======================================================
 
 async def schedule_file_deletion(client, sent_msg, uid, file_id):
+    """Separate task for file deletion"""
     msg_id = sent_msg.id
-
+    
+    # Track in temp storage
     temp.FILES[msg_id] = {
         "owner": uid,
         "file_id": file_id,
         "expire": int(time.time()) + PM_FILE_DELETE_TIME
     }
-
+    
     try:
+        # Wait for expiry
         await asyncio.sleep(PM_FILE_DELETE_TIME)
-
+        
+        # Remove from tracking
         data = temp.FILES.pop(msg_id, None)
         if not data:
             return
-
+        
+        # Delete the file message
         try:
             await sent_msg.delete()
-        except:
+        except Exception as e:
             pass
-
+        
+        # Send resend button
         resend = await client.send_message(
             uid,
             "⌛ <b>File expired</b>",
@@ -151,70 +167,88 @@ async def schedule_file_deletion(client, sent_msg, uid, file_id):
                 )]
             ])
         )
-
+        
+        # Auto-delete resend button after timeout
         await asyncio.sleep(RESEND_EXPIRE_TIME)
         try:
             await resend.delete()
-        except:
+        except Exception as e:
             pass
-
+            
     except asyncio.CancelledError:
+        # Task was cancelled, clean up
         temp.FILES.pop(msg_id, None)
         raise
 
 
 # ======================================================
-# CORE DELIVERY (FAST / NON-BLOCKING)
+# CORE DELIVERY (NON-BLOCKING)
 # ======================================================
 
 async def deliver_file(client, uid, grp_id, file_id):
-    file = await get_file_details(file_id)
-    if not file:
-        return
+    try:
+        file = await get_file_details(file_id)
+        if not file:
+            return
 
-    settings = await get_settings(grp_id)
+        settings = await get_settings(grp_id)
 
-    if settings.get("shortlink") and not await has_premium_or_grace(uid):
-        return
+        if settings.get("shortlink") and not await has_premium_or_grace(uid):
+            return
 
-    file_name = (file.get("file_name") or "").strip()
-    file_caption = (file.get("caption") or "").strip()
+        # ==================================================
+        # CLEAN CAPTION (NO DUPLICATE EVER)
+        # ==================================================
+        file_name = (file.get("file_name") or "").strip()
+        file_caption = (file.get("caption") or "").strip()
 
-    if not file_caption or file_caption == file_name:
-        caption = file_name
-    else:
-        caption = f"{file_name}\n\n{file_caption}"
+        if not file_caption or file_caption == file_name:
+            caption = file_name
+        else:
+            caption = f"{file_name}\n\n{file_caption}"
 
-    buttons = []
-    if IS_STREAM:
-        buttons.append([
-            InlineKeyboardButton(
-                "▶️ Watch / Download",
-                callback_data=f"stream#{file_id}"
-            )
-        ])
-    buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_data")])
+        # ==================================================
+        # BUTTONS
+        # ==================================================
+        buttons = []
+        if IS_STREAM:
+            buttons.append([
+                InlineKeyboardButton(
+                    "▶️ Watch / Download",
+                    callback_data=f"stream#{file_id}"
+                )
+            ])
+        buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_data")])
 
-    markup = InlineKeyboardMarkup(buttons)
+        markup = InlineKeyboardMarkup(buttons)
 
-    sent = await client.send_cached_media(
-        chat_id=uid,
-        file_id=file_id,
-        caption=caption,
-        protect_content=PROTECT_CONTENT,
-        reply_markup=markup
-    )
+        sent = await client.send_cached_media(
+            chat_id=uid,
+            file_id=file_id,
+            caption=caption,
+            protect_content=PROTECT_CONTENT,
+            reply_markup=markup
+        )
 
-    delete_task = asyncio.create_task(
-        schedule_file_deletion(client, sent, uid, file_id)
-    )
-
-    active_tasks[f"delete_{sent.id}"] = delete_task
-
-    def cleanup_delete(t):
-        active_tasks.pop(f"delete_{sent.id}", None)
-
-    delete_task.add_done_callback(cleanup_delete)
+        # ==================================================
+        # SCHEDULE DELETION (NON-BLOCKING)
+        # ==================================================
+        deletion_task = asyncio.create_task(
+            schedule_file_deletion(client, sent, uid, file_id)
+        )
+        
+        # Track deletion task
+        task_key = f"delete_{sent.id}"
+        active_tasks[task_key] = deletion_task
+        
+        # Cleanup when done
+        def cleanup_deletion(t):
+            active_tasks.pop(task_key, None)
+        
+        deletion_task.add_done_callback(cleanup_deletion)
+        
+    except Exception as e:
+        pass
 
 
 # ======================================================
@@ -232,4 +266,5 @@ async def resend_handler(client, query: CallbackQuery):
     except:
         pass
 
+    # Use the same delivery mechanism
     asyncio.create_task(deliver_file(client, uid, 0, file_id))
