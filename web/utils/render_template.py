@@ -1,203 +1,142 @@
-import urllib.parse
-import html
-
 from info import BIN_CHANNEL, URL
 from utils import temp
+import urllib.parse, html
 
+# ======================================================
+# ⚡ ULTRA FAST WATCH TEMPLATE (MINIMAL)
+# ======================================================
 
-WATCH_TEMPLATE = """
-<!DOCTYPE html>
+WATCH_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{title}</title>
 
-<link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css"/>
+<link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
 
 <style>
-:root {
-    --bg: #f8fafc;
-    --card: #ffffff;
-    --text: #0f172a;
-    --muted: #64748b;
-    --accent: #ef4444;
-    --btn: #e5e7eb;
-}
+:root {{
+  --primary: #e53935;
+  --bg: #ffffff;
+  --card: #f5f5f5;
+  --text: #111111;
+}}
 
-body.dark {
-    --bg: #0f172a;
-    --card: #1e293b;
-    --text: #f8fafc;
-    --muted: #94a3b8;
-    --btn: #111827;
-}
+body {{
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}}
 
-* {
-    box-sizing: border-box;
-    font-family: system-ui, -apple-system, sans-serif;
-}
+header {{
+  padding: 12px 16px;
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--primary);
+}}
 
-body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-}
+.container {{
+  padding: 12px;
+  max-width: 900px;
+  margin: auto;
+}}
 
-header {
-    padding: 14px 16px;
-    background: var(--card);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-weight: 700;
-}
+.player-box {{
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+}}
 
-.brand {
-    color: var(--accent);
-    font-size: 18px;
-}
+video {{
+  width: 100%;
+  height: auto;
+}}
 
-.toggle {
-    cursor: pointer;
-    font-size: 18px;
-}
+.file-name {{
+  font-size: 16px;
+  font-weight: 600;
+  margin: 12px 0;
+}}
 
-.container {
-    max-width: 880px;
-    margin: auto;
-    padding: 14px;
-}
+.tags {{
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}}
 
-.card {
-    background: var(--card);
-    border-radius: 12px;
-    padding: 14px;
-    border: 1px solid #e5e7eb;
-}
+.tag {{
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #ffecec;
+  color: #c62828;
+}}
 
-body.dark .card {
-    border-color: #334155;
-}
+.download-btn {{
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 12px;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 600;
+  border-radius: 10px;
+  text-decoration: none;
+}}
 
-video {
-    width: 100%;
-    border-radius: 10px;
-    background: black;
-}
-
-.title {
-    margin-top: 12px;
-    font-size: 17px;
-    font-weight: 600;
-}
-
-.tags {
-    margin: 8px 0;
-}
-
-.tag {
-    display: inline-block;
-    padding: 3px 10px;
-    font-size: 12px;
-    border-radius: 999px;
-    background: rgba(239,68,68,.12);
-    color: var(--accent);
-    margin-right: 6px;
-}
-
-.actions {
-    margin-top: 12px;
-    display: grid;
-    gap: 10px;
-}
-
-.btn {
-    padding: 11px;
-    text-align: center;
-    border-radius: 8px;
-    font-weight: 600;
-    background: var(--btn);
-    color: var(--text);
-    text-decoration: none;
-}
-
-.btn.primary {
-    background: var(--accent);
-    color: #fff;
-}
-
-.note {
-    margin-top: 12px;
-    padding: 10px;
-    background: rgba(0,0,0,.05);
-    border-radius: 8px;
-    font-size: 13px;
-    color: var(--muted);
-    text-align: center;
-}
-
-footer {
-    margin: 18px 0;
-    text-align: center;
-    font-size: 12px;
-    color: var(--muted);
-}
+footer {{
+  margin-top: 24px;
+  padding: 12px;
+  text-align: center;
+  font-size: 13px;
+  color: #777;
+}}
 </style>
 </head>
 
 <body>
 
-<header>
-    <div class="brand">FAST FINDER</div>
-    <div class="toggle" onclick="toggleMode()">🌙</div>
-</header>
+<header>FAST FINDER</header>
 
 <div class="container">
-    <div class="card">
 
-        <video class="player" controls playsinline src="{src}"></video>
+  <div class="player-box">
+    <video class="player" controls playsinline src="{src}"></video>
+  </div>
 
-        <div class="title">{file_name}</div>
+  <div class="file-name">{file_name}</div>
 
-        <div class="tags">
-            <span class="tag">STREAM</span>
-            <span class="tag">FAST</span>
-            <span class="tag">NO ADS</span>
-        </div>
+  <div class="tags">
+    <div class="tag">STREAM</div>
+    <div class="tag">FAST</div>
+    <div class="tag">NO ADS</div>
+  </div>
 
-        <div class="actions">
-            <a class="btn primary" href="{src}" download>⬇ Direct Download</a>
-            <a class="btn" href="vlc://{src}">▶ Play in VLC</a>
-        </div>
+  <a class="download-btn" href="{src}" download>⬇ Direct Download</a>
 
-        <div class="note">
-            If video not playing, use VLC or MX Player.
-        </div>
-
-    </div>
-
-    <footer>
-        © 2025 Fast Finder Bot
-    </footer>
 </div>
 
+<footer>© 2025 Fast Finder Bot</footer>
+
 <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
+
 <script>
-new Plyr('.player');
+/* ---- Ultra light Telegram theme sync (ONE TIME) ---- */
+(function () {{
+  if (!window.Telegram || !Telegram.WebApp) return;
+  const t = Telegram.WebApp.themeParams;
+  const r = document.documentElement;
+  if (t.button_color) r.style.setProperty('--primary', t.button_color);
+  if (t.bg_color) r.style.setProperty('--bg', t.bg_color);
+  if (t.text_color) r.style.setProperty('--text', t.text_color);
+}})();
 
-function toggleMode(){
-    document.body.classList.toggle("dark");
-    localStorage.setItem("mode",
-        document.body.classList.contains("dark") ? "dark" : "light"
-    );
-}
-
-(function(){
-    if(localStorage.getItem("mode")==="dark"){
-        document.body.classList.add("dark");
-    }
-})();
+/* ---- Plyr init (minimal controls) ---- */
+new Plyr('.player', {{
+  controls: ['play','progress','current-time','fullscreen']
+}});
 </script>
 
 </body>
@@ -205,23 +144,23 @@ function toggleMode(){
 """
 
 
+# ======================================================
+# 🎬 WATCH HANDLER
+# ======================================================
+
 async def media_watch(message_id: int):
-    media_msg = await temp.BOT.get_messages(BIN_CHANNEL, message_id)
+    msg = await temp.BOT.get_messages(BIN_CHANNEL, message_id)
+    media = getattr(msg, msg.media.value, None)
 
-    if not media_msg or not media_msg.media:
-        return "<h1>File not found</h1>"
-
-    media = getattr(media_msg, media_msg.media.value, None)
-
-    if not media or not media.mime_type.startswith("video"):
-        return "<h1>This file is not streamable</h1>"
+    if not media:
+        return "<h3>File not found</h3>"
 
     src = urllib.parse.urljoin(URL, f"download/{message_id}")
-    file_name = html.escape(media.file_name or "Video")
+    title = html.escape(f"Watch - {media.file_name}")
+    name = html.escape(media.file_name)
 
-    return (
-        WATCH_TEMPLATE
-        .replace("{title}", f"Watch - {file_name}")
-        .replace("{file_name}", file_name)
-        .replace("{src}", src)
+    return WATCH_HTML.format(
+        title=title,
+        file_name=name,
+        src=src
     )
