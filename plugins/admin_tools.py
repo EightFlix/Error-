@@ -6,6 +6,7 @@ from datetime import datetime
 
 from hydrogram import Client, filters
 from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from hydrogram.errors import MessageNotModified
 
 from info import ADMINS, LOG_CHANNEL
 from database.users_chats_db import db
@@ -20,7 +21,21 @@ DASH_REFRESH = 45  # seconds
 DASH_CACHE = {}   # admin_id -> (text, ts)
 
 # ======================================================
-# 📊 DASHBOARD BUILDER (SAFE)
+# 🛡 SAFE EDIT (FIX MESSAGE_NOT_MODIFIED)
+# ======================================================
+
+async def safe_edit(msg, text, **kwargs):
+    try:
+        if msg.text == text:
+            return
+        await msg.edit(text, **kwargs)
+    except MessageNotModified:
+        pass
+    except Exception:
+        pass
+
+# ======================================================
+# 📊 DASHBOARD BUILDER
 # ======================================================
 
 async def build_dashboard():
@@ -52,18 +67,29 @@ async def build_dashboard():
     uptime = get_readable_time(time.time() - temp.START_TIME)
     now = datetime.now().strftime("%d %b %Y, %I:%M %p")
 
-    text = (
+    # ---- live indexing stats ----
+    idx = temp.INDEX_STATS if hasattr(temp, "INDEX_STATS") else {}
+    idx_text = "❌ Not running"
+    if idx.get("running"):
+        dur = max(1, time.time() - idx.get("start", time.time()))
+        speed = idx.get("saved", 0) / dur
+        idx_text = f"🚀 {speed:.2f} files/sec"
+
+    return (
         "📊 <b>LIVE ADMIN DASHBOARD</b>\n\n"
         f"👤 <b>Users</b>        : <code>{users}</code>\n"
         f"👥 <b>Groups</b>       : <code>{chats}</code>\n"
         f"📦 <b>Indexed Files</b>: <code>{files}</code>\n"
         f"💎 <b>Premium Users</b>: <code>{premium}</code>\n\n"
-        f"🗃 <b>Data DB Size</b> : <code>{used_data}</code>\n\n"
+        f"⚡ <b>Index Speed</b>  : <code>{idx_text}</code>\n"
+        f"🗃 <b>DB Size</b>      : <code>{used_data}</code>\n\n"
         f"⏱ <b>Uptime</b>       : <code>{uptime}</code>\n"
         f"🔄 <b>Updated</b>      : <code>{now}</code>"
     )
-    return text
 
+# ======================================================
+# 🎛 DASHBOARD BUTTONS
+# ======================================================
 
 def dashboard_buttons():
     return InlineKeyboardMarkup(
@@ -84,19 +110,17 @@ def dashboard_buttons():
     )
 
 # ======================================================
-# 🚀 OPEN DASHBOARD (/admin, /dashboard)
+# 🚀 OPEN DASHBOARD
 # ======================================================
 
 @Client.on_message(filters.command(["admin", "dashboard"]) & filters.user(ADMINS))
 async def open_dashboard(bot, message):
     text = await build_dashboard()
-
     msg = await message.reply(
         text,
         reply_markup=dashboard_buttons(),
         disable_web_page_preview=True
     )
-
     DASH_CACHE[message.from_user.id] = (text, time.time())
 
 # ======================================================
@@ -119,7 +143,8 @@ async def dashboard_callbacks(bot, query: CallbackQuery):
             text = await build_dashboard()
             DASH_CACHE[query.from_user.id] = (text, time.time())
 
-        await query.message.edit(
+        await safe_edit(
+            query.message,
             text,
             reply_markup=dashboard_buttons(),
             disable_web_page_preview=True
@@ -128,7 +153,7 @@ async def dashboard_callbacks(bot, query: CallbackQuery):
     # ---------- HEALTH ----------
     elif action == "dash_health":
         report = await run_premium_health(False)
-        await query.message.edit(report)
+        await safe_edit(query.message, report)
 
         try:
             await bot.send_message(LOG_CHANNEL, report)
@@ -137,23 +162,21 @@ async def dashboard_callbacks(bot, query: CallbackQuery):
 
     # ---------- BROADCAST ----------
     elif action == "dash_broadcast":
-        await query.message.edit(
-            "📢 <b>Broadcast</b>\n\n"
-            "Reply to any message and use:\n"
-            "<code>/broadcast</code>"
+        await safe_edit(
+            query.message,
+            "📢 <b>Broadcast</b>\n\nReply to any message and use:\n<code>/broadcast</code>"
         )
 
     # ---------- DELETE ----------
     elif action == "dash_delete":
-        await query.message.edit(
-            "🗑 <b>Delete Files</b>\n\n"
-            "Use command:\n"
-            "<code>/delete keyword</code>"
+        await safe_edit(
+            query.message,
+            "🗑 <b>Delete Files</b>\n\nUse:\n<code>/delete keyword</code>"
         )
 
     # ---------- RESTART ----------
     elif action == "dash_restart":
-        await query.message.edit("🔄 Restarting bot...")
+        await safe_edit(query.message, "🔄 Restarting bot...")
 
         with open("restart.txt", "w") as f:
             f.write(f"{query.message.chat.id}\n{query.message.id}")
@@ -171,7 +194,7 @@ async def dashboard_callbacks(bot, query: CallbackQuery):
     await query.answer()
 
 # ======================================================
-# 🩺 PREMIUM HEALTH (SAFE)
+# 🩺 PREMIUM HEALTH
 # ======================================================
 
 async def run_premium_health(auto_fix=False):
@@ -250,7 +273,8 @@ async def confirm_delete(bot, query: CallbackQuery):
     key = query.data.split("#", 1)[1]
     count = await delete_files(key)
 
-    await query.message.edit(
+    await safe_edit(
+        query.message,
         f"🗑 <b>Delete Completed</b>\n\n"
         f"Keyword: <code>{key}</code>\n"
         f"Files Removed: <code>{count}</code>"
