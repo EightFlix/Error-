@@ -2,9 +2,6 @@ from pymongo import MongoClient
 from datetime import datetime
 import time
 
-# =========================
-# 🔐 REQUIRED CONFIGS
-# =========================
 from info import (
     BOT_ID,
     ADMINS,
@@ -14,44 +11,7 @@ from info import (
 )
 
 # =========================
-# 🧩 OPTIONAL CONFIGS (SAFE)
-# =========================
-try:
-    from info import (
-        IMDB_TEMPLATE,
-        WELCOME_TEXT,
-        LINK_MODE,
-        TUTORIAL,
-        SHORTLINK_URL,
-        SHORTLINK_API,
-        SHORTLINK,
-        FILE_CAPTION,
-        IMDB,
-        WELCOME,
-        SPELL_CHECK,
-        PROTECT_CONTENT,
-        AUTO_DELETE,
-        IS_STREAM,
-    )
-except ImportError:
-    IMDB_TEMPLATE = ""
-    WELCOME_TEXT = ""
-    LINK_MODE = True
-    TUTORIAL = ""
-    SHORTLINK_URL = None
-    SHORTLINK_API = None
-    SHORTLINK = False
-    FILE_CAPTION = "{file_name}"
-    IMDB = False
-    WELCOME = True
-    SPELL_CHECK = False
-    PROTECT_CONTENT = True
-    AUTO_DELETE = False
-    IS_STREAM = True
-
-
-# =========================
-# 🔗 MongoDB (SINGLE DB)
+# 🔗 MongoDB
 # =========================
 client = MongoClient(DATA_DATABASE_URL)
 dbase = client[DATABASE_NAME]
@@ -63,19 +23,6 @@ class Database:
     # ⚙️ DEFAULT STRUCTURES
     # =========================
     default_settings = {
-        "file_secure": PROTECT_CONTENT,
-        "imdb": IMDB,
-        "spell_check": SPELL_CHECK,
-        "auto_delete": AUTO_DELETE,
-        "welcome": WELCOME,
-        "welcome_text": WELCOME_TEXT,
-        "template": IMDB_TEMPLATE,
-        "caption": FILE_CAPTION,
-        "shortlink": SHORTLINK,
-        "shortlink_url": SHORTLINK_URL,
-        "shortlink_api": SHORTLINK_API,
-        "tutorial": TUTORIAL,
-        "links": LINK_MODE,
         "pm_search": True,
         "group_search": True,
     }
@@ -89,7 +36,7 @@ class Database:
 
     default_plan = {
         "premium": False,
-        "plan": "",
+        "plan": "free",
         "expire": None,
         "invoice": [],
         "last_reminder": None,
@@ -100,38 +47,47 @@ class Database:
     # 🧠 INIT COLLECTIONS
     # =========================
     def __init__(self):
-        self.users = dbase.Users
-        self.groups = dbase.Groups
-        self.premium = dbase.Premiums
-        self.settings = dbase.BotSettings
-        self.reminders = dbase.Reminders
-        self.trials = dbase.Trials
+        self.users = dbase.users
+        self.groups = dbase.groups
+        self.premium = dbase.premium
+        self.reminders = dbase.reminders
+        self.bans = dbase.bans
 
     # =========================
     # 👤 USERS
     # =========================
+    async def is_user_exist(self, user_id: int):
+        return self.users.find_one({"id": user_id}) is not None
+
     async def add_user(self, user_id, name):
         if not self.users.find_one({"id": user_id}):
             self.users.insert_one({
                 "id": user_id,
                 "name": name,
                 "created_at": time.time(),
-                "verify": self.default_verify,
-                "ban": {"status": False, "reason": ""},
+                "verify": self.default_verify.copy(),
             })
 
     async def total_users_count(self):
         return self.users.count_documents({})
 
-    async def get_all_users(self):
-        return self.users.find({})
+    # =========================
+    # 🚫 BANS
+    # =========================
+    async def get_banned_users(self):
+        return self.bans.find({
+            "until": {"$gt": time.time()}
+        })
 
-    async def delete_user(self, user_id):
-        self.users.delete_one({"id": user_id})
+    async def ban_user(self, user_id, until, reason=""):
+        self.bans.update_one(
+            {"id": user_id},
+            {"$set": {"until": until, "reason": reason}},
+            upsert=True
+        )
 
-    async def get_ban_status(self, user_id):
-        u = self.users.find_one({"id": user_id})
-        return u.get("ban", {"status": False, "reason": ""}) if u else {"status": False}
+    async def unban_user(self, user_id):
+        self.bans.delete_one({"id": user_id})
 
     # =========================
     # 👥 GROUPS
@@ -141,11 +97,8 @@ class Database:
             self.groups.insert_one({
                 "id": chat_id,
                 "title": title,
-                "settings": self.default_settings,
+                "settings": self.default_settings.copy(),
             })
-
-    async def total_chat_count(self):
-        return self.groups.count_documents({})
 
     async def get_settings(self, chat_id):
         g = self.groups.find_one({"id": chat_id})
@@ -162,8 +115,8 @@ class Database:
     # 💎 PREMIUM
     # =========================
     def get_plan(self, user_id):
-        p = self.premium.find_one({"id": user_id})
-        return p["plan"] if p else self.default_plan
+        p = self.premium.find_one({"id": user_id}) or {}
+        return p.get("plan", self.default_plan)
 
     def update_plan(self, user_id, plan):
         self.premium.update_one(
@@ -175,34 +128,9 @@ class Database:
     def get_premium_users(self):
         return self.premium.find({"plan.premium": True})
 
-    def get_premium_count(self):
-        return self.premium.count_documents({"plan.premium": True})
-
     # =========================
-    # 🧾 INVOICE
+    # ⏰ REMINDERS
     # =========================
-    def add_invoice(self, user_id, invoice):
-        self.premium.update_one(
-            {"id": user_id},
-            {"$push": {"plan.invoice": invoice}},
-            upsert=True
-        )
-
-    def get_invoices(self, user_id):
-        p = self.premium.find_one({"id": user_id})
-        return p.get("plan", {}).get("invoice", []) if p else []
-
-    # =========================
-    # ⏰ SMART REMINDERS
-    # =========================
-    def add_reminder(self, user_id, remind_at, rtype="premium"):
-        self.reminders.insert_one({
-            "user_id": user_id,
-            "type": rtype,
-            "remind_at": remind_at,
-            "sent": False,
-        })
-
     def get_due_reminders(self):
         return self.reminders.find({
             "sent": False,
@@ -214,19 +142,6 @@ class Database:
             {"_id": _id},
             {"$set": {"sent": True}}
         )
-
-    # =========================
-    # ⚙️ BOT SETTINGS
-    # =========================
-    def update_bot_setting(self, key, value):
-        self.settings.update_one(
-            {"id": BOT_ID},
-            {"$set": {key: value}},
-            upsert=True
-        )
-
-    def get_bot_settings(self):
-        return self.settings.find_one({"id": BOT_ID}) or {}
 
     # =========================
     # 📊 DB SIZE
