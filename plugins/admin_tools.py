@@ -7,7 +7,7 @@ from datetime import datetime
 from hydrogram import Client, filters
 from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 
-from info import ADMINS, LOG_CHANNEL, script
+from info import ADMINS, LOG_CHANNEL
 from database.users_chats_db import db
 from database.ia_filterdb import db_count_documents, delete_files
 from utils import get_size, get_readable_time, temp
@@ -20,19 +20,36 @@ DASH_REFRESH = 45  # seconds
 DASH_CACHE = {}   # admin_id -> (text, ts)
 
 # ======================================================
-# 📊 DASHBOARD BUILDER
+# 📊 DASHBOARD BUILDER (SAFE)
 # ======================================================
 
 async def build_dashboard():
-    users = await db.total_users_count()
-    chats = await db.total_chat_count()
-    files = db_count_documents()
-    premium = db.get_premium_count()
+    try:
+        users = await db.total_users_count()
+    except:
+        users = 0
 
-    used_files = get_size(await db.get_files_db_size())
-    used_data = get_size(await db.get_data_db_size())
+    try:
+        chats = db.groups.count_documents({})
+    except:
+        chats = 0
+
+    try:
+        files = db_count_documents()
+    except:
+        files = 0
+
+    try:
+        premium = db.premium.count_documents({"plan.premium": True})
+    except:
+        premium = 0
+
+    try:
+        used_data = get_size(await db.get_data_db_size())
+    except:
+        used_data = "0 B"
+
     uptime = get_readable_time(time.time() - temp.START_TIME)
-
     now = datetime.now().strftime("%d %b %Y, %I:%M %p")
 
     text = (
@@ -41,7 +58,6 @@ async def build_dashboard():
         f"👥 <b>Groups</b>       : <code>{chats}</code>\n"
         f"📦 <b>Indexed Files</b>: <code>{files}</code>\n"
         f"💎 <b>Premium Users</b>: <code>{premium}</code>\n\n"
-        f"🗂 <b>Files DB Size</b>: <code>{used_files}</code>\n"
         f"🗃 <b>Data DB Size</b> : <code>{used_data}</code>\n\n"
         f"⏱ <b>Uptime</b>       : <code>{uptime}</code>\n"
         f"🔄 <b>Updated</b>      : <code>{now}</code>"
@@ -68,7 +84,7 @@ def dashboard_buttons():
     )
 
 # ======================================================
-# 🚀 OPEN DASHBOARD
+# 🚀 OPEN DASHBOARD (/admin, /dashboard)
 # ======================================================
 
 @Client.on_message(filters.command(["admin", "dashboard"]) & filters.user(ADMINS))
@@ -109,7 +125,7 @@ async def dashboard_callbacks(bot, query: CallbackQuery):
             disable_web_page_preview=True
         )
 
-    # ---------- PREMIUM HEALTH ----------
+    # ---------- HEALTH ----------
     elif action == "dash_health":
         report = await run_premium_health(False)
         await query.message.edit(report)
@@ -155,7 +171,7 @@ async def dashboard_callbacks(bot, query: CallbackQuery):
     await query.answer()
 
 # ======================================================
-# 🩺 PREMIUM HEALTH CORE (SHARED)
+# 🩺 PREMIUM HEALTH (SAFE)
 # ======================================================
 
 async def run_premium_health(auto_fix=False):
@@ -165,13 +181,13 @@ async def run_premium_health(auto_fix=False):
     total = expired = fixed = no_invoice = admin_skip = 0
 
     for u in users:
-        uid = u["id"]
+        uid = u.get("id")
         if uid in ADMINS:
             admin_skip += 1
             continue
 
-        st = u.get("status", {})
-        expire = st.get("expire")
+        plan = u.get("plan", {})
+        expire = plan.get("expire")
         if not expire:
             continue
 
@@ -180,16 +196,15 @@ async def run_premium_health(auto_fix=False):
         if expire < now:
             expired += 1
             if auto_fix:
-                st.update({
+                plan.update({
                     "premium": False,
                     "expire": "",
-                    "plan": "",
-                    "last_reminder": "expired"
+                    "plan": "free"
                 })
-                db.update_plan(uid, st)
+                db.update_plan(uid, plan)
                 fixed += 1
 
-        if not st.get("invoices"):
+        if not plan.get("invoice"):
             no_invoice += 1
 
     return (
