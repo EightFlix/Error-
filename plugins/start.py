@@ -22,10 +22,14 @@ def start_buttons():
 
 
 # ======================================================
-# 🚀 /start COMMAND
+# 🚀 /start COMMAND (NORMAL - NOT FILE DELIVERY)
 # ======================================================
 
-@Client.on_message(filters.command("start") & filters.private)
+@Client.on_message(
+    filters.command("start") & 
+    filters.private & 
+    ~filters.regex(r"file_")  # ✅ Exclude file delivery
+)
 async def start_cmd(client, message):
     await message.reply_photo(
         photo=random.choice(PICS),
