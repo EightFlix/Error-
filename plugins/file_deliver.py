@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 from hydrogram import Client, filters
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from hydrogram.errors import MessageNotModified
 
 from info import (
     IS_STREAM,
@@ -18,7 +19,6 @@ from utils import (
     get_size,
     get_shortlink,
     get_readable_time,
-    is_premium,
     temp
 )
 
@@ -28,12 +28,15 @@ from utils import (
 
 GRACE_PERIOD = timedelta(minutes=30)
 
+# temp memory init
+if not hasattr(temp, "FILES"):
+    temp.FILES = {}
+
 # ======================================================
 # 🧠 PREMIUM CHECK (SAFE)
 # ======================================================
 
 async def has_premium_or_grace(user_id, bot):
-    # admin always premium
     if user_id in ADMINS:
         return True
 
@@ -49,14 +52,34 @@ async def has_premium_or_grace(user_id, bot):
         expire = datetime.utcfromtimestamp(expire)
 
     now = datetime.utcnow()
+    return now <= expire or now <= expire + GRACE_PERIOD
 
-    if now <= expire:
-        return True
 
-    if now <= expire + GRACE_PERIOD:
-        return True
+# ======================================================
+# ⏱️ COUNTDOWN TASK
+# ======================================================
 
-    return False
+async def countdown_task(user_id, seconds):
+    try:
+        while seconds > 0:
+            await asyncio.sleep(60)
+            seconds -= 60
+
+            data = temp.FILES.get(user_id)
+            if not data:
+                return
+
+            notice = data["notice"]
+            try:
+                await notice.edit(
+                    f"⚠️ File will be deleted in {get_readable_time(seconds)}"
+                )
+            except MessageNotModified:
+                pass
+            except:
+                return
+    except asyncio.CancelledError:
+        return
 
 
 # ======================================================
@@ -76,7 +99,6 @@ async def file_delivery_handler(client: Client, query: CallbackQuery):
 
     premium_ok = await has_premium_or_grace(uid, client)
 
-    # ---- FREE USER → SHORTLINK ----
     if settings.get("shortlink") and not premium_ok:
         link = await get_shortlink(
             settings.get("url"),
@@ -87,7 +109,7 @@ async def file_delivery_handler(client: Client, query: CallbackQuery):
         return await query.message.reply_text(
             f"<b>📁 File:</b> {file.get('file_name')}\n"
             f"<b>📦 Size:</b> {get_size(file.get('file_size', 0))}\n\n"
-            "🔓 Unlock using button below:",
+            "🔓 Unlock below:",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚀 Get File", url=link)],
                 [InlineKeyboardButton("⚡ Upgrade Premium", callback_data="buy_premium")],
@@ -95,7 +117,6 @@ async def file_delivery_handler(client: Client, query: CallbackQuery):
             ])
         )
 
-    # ---- PREMIUM / GRACE ----
     await query.answer(
         url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}"
     )
@@ -131,15 +152,13 @@ async def start_handler(client, message):
 
     if settings.get("shortlink") and not premium_ok:
         return await message.reply(
-            "🔒 Your premium has expired.\n\nRenew to continue.",
+            "🔒 Your premium has expired.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⚡ Renew Premium", callback_data="buy_premium")]
             ])
         )
 
-    # -------- SAFE CAPTION (FIXED) --------
     caption_tpl = settings.get("caption") or "{file_name}\n\n{file_caption}"
-
     caption = caption_tpl.format(
         file_name=file.get("file_name", "File"),
         file_size=get_size(file.get("file_size", 0)),
@@ -149,10 +168,7 @@ async def start_handler(client, message):
     buttons = []
     if IS_STREAM:
         buttons.append([
-            InlineKeyboardButton(
-                "▶️ Watch / Download",
-                callback_data=f"stream#{file_id}"
-            )
+            InlineKeyboardButton("▶️ Watch / Download", callback_data=f"stream#{file_id}")
         ])
     buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_data")])
 
@@ -168,15 +184,33 @@ async def start_handler(client, message):
         f"⚠️ File will be deleted in {get_readable_time(PM_FILE_DELETE_TIME)}"
     )
 
+    # delete /start message
+    try:
+        await message.delete()
+    except:
+        pass
+
+    task = asyncio.create_task(countdown_task(uid, PM_FILE_DELETE_TIME))
+
+    temp.FILES[uid] = {
+        "file": sent,
+        "notice": notice,
+        "task": task
+    }
+
     await asyncio.sleep(PM_FILE_DELETE_TIME)
 
+    data = temp.FILES.pop(uid, None)
+    if not data:
+        return
+
     try:
-        await sent.delete()
+        await data["file"].delete()
     except:
         pass
 
     try:
-        await notice.edit(
+        await data["notice"].edit(
             "⌛ Time expired. File deleted.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔁 Get Again", callback_data=f"file#{file_id}")]
