@@ -31,8 +31,6 @@ from database.ia_filterdb import db_count_documents
 
 async def safe_edit_media(msg, media, reply_markup=None):
     try:
-        if not msg or not media:
-            return
         await msg.edit_media(media=media, reply_markup=reply_markup)
     except MessageNotModified:
         pass
@@ -42,8 +40,6 @@ async def safe_edit_media(msg, media, reply_markup=None):
 
 async def safe_edit_caption(msg, caption, reply_markup=None):
     try:
-        if msg.caption == caption:
-            return
         await msg.edit_caption(caption, reply_markup=reply_markup)
     except MessageNotModified:
         pass
@@ -61,33 +57,6 @@ async def safe_edit_markup(msg, reply_markup):
 
 
 # ======================================================
-# 🔘 UI HELPERS
-# ======================================================
-
-def start_buttons():
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "+ Add Me To Your Group +",
-                    url=f"https://t.me/{temp.U_NAME}?startgroup=start"
-                )
-            ],
-            [
-                InlineKeyboardButton("👨‍🚒 Help", callback_data="help"),
-                InlineKeyboardButton("📚 About", callback_data="about")
-            ]
-        ]
-    )
-
-
-def back_btn(cb="start"):
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("« Back", callback_data=cb)]]
-    )
-
-
-# ======================================================
 # 🔁 CALLBACK HANDLER
 # ======================================================
 
@@ -97,29 +66,26 @@ async def cb_handler(client: Client, query: CallbackQuery):
     uid = query.from_user.id
 
     # --------------------------------------------------
-    # ❗ IGNORE PAGINATION (handled in filter.py)
+    # ❗ PAGINATION (filter.py handles)
     # --------------------------------------------------
     if data.startswith("page#") or data == "pages":
         return await query.answer()
 
     # ==================================================
-    # ❌ CLOSE (OWNER ONLY)
+    # ❌ CLOSE FILE (OWNER ONLY)
     # ==================================================
     if data == "close_data":
         await query.answer("Closed")
 
-        mem = temp.FILES.get(uid)
+        target_key = None
+        for k, v in temp.FILES.items():
+            if v.get("owner") == uid:
+                target_key = k
+                break
 
-        # ---- ownership validation ----
-        if mem and mem.get("owner") != uid:
-            return await query.answer(
-                "❌ This file is not for you",
-                show_alert=True
-            )
+        if target_key:
+            mem = temp.FILES.pop(target_key, None)
 
-        # ---- PM FILE CLEANUP ----
-        mem = temp.FILES.pop(uid, None)
-        if mem:
             try:
                 mem["task"].cancel()
             except:
@@ -135,7 +101,6 @@ async def cb_handler(client: Client, query: CallbackQuery):
             except:
                 pass
 
-        # ---- UI CLEANUP ----
         try:
             await query.message.delete()
             if query.message.reply_to_message:
@@ -148,10 +113,15 @@ async def cb_handler(client: Client, query: CallbackQuery):
     # ▶️ STREAM (OWNER + PREMIUM)
     # ==================================================
     if data.startswith("stream#"):
-        mem = temp.FILES.get(uid)
+        file_id = data.split("#", 1)[1]
 
-        # ---- ownership validation ----
-        if mem and mem.get("owner") != uid:
+        owned = False
+        for v in temp.FILES.values():
+            if v.get("owner") == uid and v.get("file_id") == file_id:
+                owned = True
+                break
+
+        if not owned:
             return await query.answer(
                 "❌ This file is not for you",
                 show_alert=True
@@ -162,8 +132,6 @@ async def cb_handler(client: Client, query: CallbackQuery):
                 "🔒 Premium only feature.\nUse /plan to upgrade.",
                 show_alert=True
             )
-
-        file_id = data.split("#", 1)[1]
 
         msg = await client.send_cached_media(
             chat_id=BIN_CHANNEL,
@@ -188,7 +156,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
         return await query.answer("Links ready")
 
     # ==================================================
-    # 🆘 HELP
+    # 🆘 HELP (ONLY USER / ADMIN CMDS)
     # ==================================================
     if data == "help":
         await safe_edit_media(
@@ -203,7 +171,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
                         InlineKeyboardButton("👤 User Commands", callback_data="user_cmds"),
                         InlineKeyboardButton("🛡️ Admin Commands", callback_data="admin_cmds")
                     ],
-                    [InlineKeyboardButton("« Back", callback_data="start")]
+                    [InlineKeyboardButton("❌ Close", callback_data="close_data")]
                 ]
             )
         )
@@ -213,7 +181,9 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await safe_edit_caption(
             query.message,
             script.USER_COMMAND_TXT,
-            reply_markup=back_btn("help")
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Close", callback_data="close_data")]]
+            )
         )
         return
 
@@ -224,92 +194,10 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await safe_edit_caption(
             query.message,
             script.ADMIN_COMMAND_TXT,
-            reply_markup=back_btn("help")
-        )
-        return
-
-    # ==================================================
-    # 📚 ABOUT
-    # ==================================================
-    if data == "about":
-        await safe_edit_media(
-            query.message,
-            InputMediaPhoto(
-                random.choice(PICS),
-                caption=script.MY_ABOUT_TXT
-            ),
             reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("📊 Stats", callback_data="stats_callback"),
-                        InlineKeyboardButton("👤 Owner", callback_data="owner_info")
-                    ],
-                    [InlineKeyboardButton("« Back", callback_data="start")]
-                ]
+                [[InlineKeyboardButton("❌ Close", callback_data="close_data")]]
             )
         )
-        return
-
-    if data == "owner_info":
-        await safe_edit_caption(
-            query.message,
-            script.MY_OWNER_TXT,
-            reply_markup=back_btn("about")
-        )
-        return
-
-    # ==================================================
-    # 🔙 BACK TO START
-    # ==================================================
-    if data == "start":
-        await safe_edit_media(
-            query.message,
-            InputMediaPhoto(
-                random.choice(PICS),
-                caption=script.START_TXT.format(
-                    query.from_user.mention,
-                    get_wish()
-                )
-            ),
-            reply_markup=start_buttons()
-        )
-        return
-
-    # ==================================================
-    # 🎞 QUALITY GROUPING
-    # ==================================================
-    if data.startswith("group_quality#"):
-        _, search, req = data.split("#")
-        if int(req) != uid:
-            return await query.answer("Not for you", show_alert=True)
-
-        btn = []
-        for i in range(0, len(QUALITY), 2):
-            row = [
-                InlineKeyboardButton(
-                    QUALITY[i].upper(),
-                    callback_data=f"apply_quality#{QUALITY[i]}#{search}#{req}"
-                )
-            ]
-            if i + 1 < len(QUALITY):
-                row.append(
-                    InlineKeyboardButton(
-                        QUALITY[i + 1].upper(),
-                        callback_data=f"apply_quality#{QUALITY[i + 1]}#{search}#{req}"
-                    )
-                )
-            btn.append(row)
-
-        btn.append([InlineKeyboardButton("❌ Close", callback_data="close_data")])
-
-        try:
-            if query.message.text != "<b>Select Quality 👇</b>":
-                await query.message.edit_text(
-                    "<b>Select Quality 👇</b>",
-                    reply_markup=InlineKeyboardMarkup(btn)
-                )
-        except MessageNotModified:
-            pass
         return
 
     # ==================================================
@@ -332,5 +220,5 @@ async def cb_handler(client: Client, query: CallbackQuery):
             show_alert=True
         )
 
-    # ---------------- FALLBACK ----------------
+    # --------------------------------------------------
     await query.answer("Unknown action")
