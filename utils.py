@@ -21,7 +21,7 @@ from shortzy import Shortzy
 
 
 # ======================================================
-# 🧠 GLOBAL RUNTIME STATE (SAFE)
+# 🧠 GLOBAL RUNTIME STATE (SAFE & SYNCED)
 # ======================================================
 
 class temp(object):
@@ -46,8 +46,13 @@ class temp(object):
     SETTINGS = {}
     VERIFICATIONS = {}
 
-    # 🔥 FILE DELIVERY CACHE
-    # file_id -> {"user": int, "msg": int, "expire": ts}
+    # 🔥 FILE DELIVERY MEMORY
+    # user_id -> {
+    #   "file": Message,
+    #   "notice": Message,
+    #   "task": asyncio.Task,
+    #   "expire": timestamp
+    # }
     FILES = {}
 
     # premium cache (optional)
@@ -77,18 +82,21 @@ GRACE_PERIOD = timedelta(minutes=20)
 
 async def cleanup_files_memory():
     """
-    Auto removes expired temp.FILES entries
+    Auto-removes expired temp.FILES entries
+    Prevents memory leak on PM file delivery
     """
     while True:
         try:
             now = int(datetime.utcnow().timestamp())
-            expired = [
-                k for k, v in temp.FILES.items()
-                if v.get("expire", 0) <= now
+            expired_users = [
+                uid for uid, data in temp.FILES.items()
+                if data.get("expire", 0) <= now
             ]
-            for k in expired:
-                temp.FILES.pop(k, None)
-        except:
+
+            for uid in expired_users:
+                temp.FILES.pop(uid, None)
+
+        except Exception:
             pass
 
         await asyncio.sleep(60)
@@ -160,7 +168,7 @@ async def update_verify_status(user_id, **kwargs):
 
 
 # ======================================================
-# 👑 PREMIUM CHECK (SINGLE SOURCE)
+# 👑 PREMIUM CHECK (SINGLE SOURCE OF TRUTH)
 # ======================================================
 
 async def is_premium(user_id, bot=None) -> bool:
@@ -181,7 +189,7 @@ async def is_premium(user_id, bot=None) -> bool:
     if datetime.utcnow() <= expire + GRACE_PERIOD:
         return True
 
-    # auto cleanup
+    # auto cleanup after hard expiry
     plan.update({
         "premium": False,
         "expire": "",
@@ -214,12 +222,16 @@ async def check_premium(bot):
                     expire = datetime.utcfromtimestamp(expire)
 
                 if now > expire + GRACE_PERIOD:
-                    plan.update({"premium": False, "expire": "", "plan": ""})
+                    plan.update({
+                        "premium": False,
+                        "expire": "",
+                        "plan": ""
+                    })
                     db.update_plan(uid, plan)
         except:
             pass
 
-        await asyncio.sleep(1800)
+        await asyncio.sleep(1800)  # 30 min
 
 
 # ======================================================
