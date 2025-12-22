@@ -1,206 +1,247 @@
 import math
 from typing import Union
+
 from hydrogram.types import Message
-from utils import temp
 from hydrogram import Client, utils, raw
 from hydrogram.session import Session, Auth
 from hydrogram.errors import AuthBytesInvalid
 from hydrogram.file_id import FileId, FileType, ThumbnailSource
 
-
-async def chunk_size(length):
-    return 2 ** max(min(math.ceil(math.log2(length / 1024)), 10), 2) * 1024
+from utils import temp
 
 
-async def offset_fix(offset, chunksize):
-    offset -= offset % chunksize
-    return offset
+# ======================================================
+# ⚡ CHUNK HELPERS (SAFE)
+# ======================================================
 
+async def chunk_size(length: int) -> int:
+    """
+    Calculate optimal chunk size for streaming.
+    Safe for edge cases.
+    """
+    if length <= 0:
+        return 256 * 1024  # fallback 256KB
+
+    return (
+        2 ** max(
+            min(math.ceil(math.log2(length / 1024)), 10),
+            2
+        ) * 1024
+    )
+
+
+async def offset_fix(offset: int, chunksize: int) -> int:
+    """
+    Align offset to chunk boundary.
+    """
+    return offset - (offset % chunksize)
+
+
+# ======================================================
+# 📡 TELEGRAM CUSTOM STREAMER
+# ======================================================
 
 class TGCustomYield:
+    """
+    Custom Telegram file streamer with DC support.
+    """
+
     def __init__(self):
-        """ A custom method to stream files from telegram.
-        functions:
-            generate_file_properties: returns the properties for a media on a specific message contained in FileId class.
-            generate_media_session: returns the media session for the DC that contains the media file on the message.
-            yield_file: yield a file from telegram servers for streaming.
-        """
         self.main_bot = temp.BOT
 
+    # --------------------------------------------------
+    # 📄 FILE PROPERTIES
+    # --------------------------------------------------
     @staticmethod
-    async def generate_file_properties(msg: Message):
+    async def generate_file_properties(msg: Message) -> FileId:
         media = getattr(msg, msg.media.value, None)
-        file_id_obj = FileId.decode(media.file_id)
-        return file_id_obj
+        return FileId.decode(media.file_id)
 
-    async def generate_media_session(self, client: Client, msg: Message):
+    # --------------------------------------------------
+    # 🌍 MEDIA SESSION (DC HANDLING)
+    # --------------------------------------------------
+    async def generate_media_session(self, client: Client, msg: Message) -> Session:
         data = await self.generate_file_properties(msg)
 
-        media_session = client.media_sessions.get(data.dc_id, None)
+        media_session = client.media_sessions.get(data.dc_id)
 
-        if media_session is None:
-            if data.dc_id != await client.storage.dc_id():
-                media_session = Session(
-                    client, data.dc_id, await Auth(client, data.dc_id, await client.storage.test_mode()).create(),
-                    await client.storage.test_mode(), is_media=True
+        if media_session:
+            return media_session
+
+        # ---- DIFFERENT DC ----
+        if data.dc_id != await client.storage.dc_id():
+            media_session = Session(
+                client,
+                data.dc_id,
+                await Auth(
+                    client,
+                    data.dc_id,
+                    await client.storage.test_mode()
+                ).create(),
+                await client.storage.test_mode(),
+                is_media=True
+            )
+            await media_session.start()
+
+            for _ in range(3):
+                exported_auth = await client.invoke(
+                    raw.functions.auth.ExportAuthorization(
+                        dc_id=data.dc_id
+                    )
                 )
-                await media_session.start()
-
-                for _ in range(3):
-                    exported_auth = await client.invoke(
-                        raw.functions.auth.ExportAuthorization(
-                            dc_id=data.dc_id
+                try:
+                    await media_session.send(
+                        raw.functions.auth.ImportAuthorization(
+                            id=exported_auth.id,
+                            bytes=exported_auth.bytes
                         )
                     )
-
-                    try:
-                        await media_session.send(
-                            raw.functions.auth.ImportAuthorization(
-                                id=exported_auth.id,
-                                bytes=exported_auth.bytes
-                            )
-                        )
-                    except AuthBytesInvalid:
-                        continue
-                    else:
-                        break
-                else:
-                    await media_session.stop()
-                    raise AuthBytesInvalid
+                    break
+                except AuthBytesInvalid:
+                    continue
             else:
-                media_session = Session(
-                    client, data.dc_id, await client.storage.auth_key(),
-                    await client.storage.test_mode(), is_media=True
-                )
-                await media_session.start()
+                await media_session.stop()
+                raise AuthBytesInvalid
 
-            client.media_sessions[data.dc_id] = media_session
+        # ---- SAME DC ----
+        else:
+            media_session = Session(
+                client,
+                data.dc_id,
+                await client.storage.auth_key(),
+                await client.storage.test_mode(),
+                is_media=True
+            )
+            await media_session.start()
 
+        client.media_sessions[data.dc_id] = media_session
         return media_session
 
+    # --------------------------------------------------
+    # 📍 FILE LOCATION
+    # --------------------------------------------------
     @staticmethod
     async def get_location(file_id: FileId):
-        file_type = file_id.file_type
-
-        if file_type == FileType.CHAT_PHOTO:
+        if file_id.file_type == FileType.CHAT_PHOTO:
             if file_id.chat_id > 0:
                 peer = raw.types.InputPeerUser(
                     user_id=file_id.chat_id,
                     access_hash=file_id.chat_access_hash
                 )
+            elif file_id.chat_access_hash == 0:
+                peer = raw.types.InputPeerChat(
+                    chat_id=-file_id.chat_id
+                )
             else:
-                if file_id.chat_access_hash == 0:
-                    peer = raw.types.InputPeerChat(
-                        chat_id=-file_id.chat_id
-                    )
-                else:
-                    peer = raw.types.InputPeerChannel(
-                        channel_id=utils.get_channel_id(file_id.chat_id),
-                        access_hash=file_id.chat_access_hash
-                    )
+                peer = raw.types.InputPeerChannel(
+                    channel_id=utils.get_channel_id(file_id.chat_id),
+                    access_hash=file_id.chat_access_hash
+                )
 
-            location = raw.types.InputPeerPhotoFileLocation(
+            return raw.types.InputPeerPhotoFileLocation(
                 peer=peer,
                 volume_id=file_id.volume_id,
                 local_id=file_id.local_id,
                 big=file_id.thumbnail_source == ThumbnailSource.CHAT_PHOTO_BIG
             )
-        elif file_type == FileType.PHOTO:
-            location = raw.types.InputPhotoFileLocation(
-                id=file_id.media_id,
-                access_hash=file_id.access_hash,
-                file_reference=file_id.file_reference,
-                thumb_size=file_id.thumbnail_size
-            )
-        else:
-            location = raw.types.InputDocumentFileLocation(
+
+        if file_id.file_type == FileType.PHOTO:
+            return raw.types.InputPhotoFileLocation(
                 id=file_id.media_id,
                 access_hash=file_id.access_hash,
                 file_reference=file_id.file_reference,
                 thumb_size=file_id.thumbnail_size
             )
 
-        return location
+        return raw.types.InputDocumentFileLocation(
+            id=file_id.media_id,
+            access_hash=file_id.access_hash,
+            file_reference=file_id.file_reference,
+            thumb_size=file_id.thumbnail_size
+        )
 
-    async def yield_file(self, media_msg: Message, offset: int, first_part_cut: int,
-                         last_part_cut: int, part_count: int, chunk_size: int):
+    # --------------------------------------------------
+    # 🎬 STREAM FILE (RANGE SUPPORT)
+    # --------------------------------------------------
+    async def yield_file(
+        self,
+        media_msg: Message,
+        offset: int,
+        first_part_cut: int,
+        last_part_cut: int,
+        part_count: int,
+        chunk_size: int
+    ):
         client = self.main_bot
         data = await self.generate_file_properties(media_msg)
         media_session = await self.generate_media_session(client, media_msg)
+        location = await self.get_location(data)
 
         current_part = 1
-
-        location = await self.get_location(data)
 
         r = await media_session.send(
             raw.functions.upload.GetFile(
                 location=location,
                 offset=offset,
                 limit=chunk_size
-            ),
+            )
         )
 
-        if isinstance(r, raw.types.upload.File):
-            while current_part <= part_count:
-                chunk = r.bytes
-                if not chunk:
-                    break
-                offset += chunk_size
-                if part_count == 1:
-                    yield chunk[first_part_cut:last_part_cut]
-                    break
-                if current_part == 1:
-                    yield chunk[first_part_cut:]
-                if 1 < current_part <= part_count:
-                    yield chunk
+        if not isinstance(r, raw.types.upload.File):
+            return
 
-                r = await media_session.send(
-                    raw.functions.upload.GetFile(
-                        location=location,
-                        offset=offset,
-                        limit=chunk_size
-                    ),
+        while current_part <= part_count:
+            chunk = r.bytes
+            if not chunk:
+                break
+
+            offset += chunk_size
+
+            if part_count == 1:
+                yield chunk[first_part_cut:last_part_cut]
+                break
+
+            if current_part == 1:
+                yield chunk[first_part_cut:]
+            else:
+                yield chunk
+
+            r = await media_session.send(
+                raw.functions.upload.GetFile(
+                    location=location,
+                    offset=offset,
+                    limit=chunk_size
                 )
+            )
 
-                current_part += 1
+            current_part += 1
 
+    # --------------------------------------------------
+    # 📥 FULL DOWNLOAD (BYTES)
+    # --------------------------------------------------
     async def download_as_bytesio(self, media_msg: Message):
         client = self.main_bot
         data = await self.generate_file_properties(media_msg)
         media_session = await self.generate_media_session(client, media_msg)
-
         location = await self.get_location(data)
 
         limit = 1024 * 1024
         offset = 0
+        result = []
 
-        r = await media_session.send(
-            raw.functions.upload.GetFile(
-                location=location,
-                offset=offset,
-                limit=limit
-            )
-        )
-
-        if isinstance(r, raw.types.upload.File):
-            m_file = []
-            # m_file.name = file_name
-            while True:
-                chunk = r.bytes
-
-                if not chunk:
-                    break
-
-                m_file.append(chunk)
-
-                offset += limit
-
-                r = await media_session.send(
-                    raw.functions.upload.GetFile(
-                        location=location,
-                        offset=offset,
-                        limit=limit
-                    )
+        while True:
+            r = await media_session.send(
+                raw.functions.upload.GetFile(
+                    location=location,
+                    offset=offset,
+                    limit=limit
                 )
+            )
 
-            return m_file
+            if not isinstance(r, raw.types.upload.File) or not r.bytes:
+                break
+
+            result.append(r.bytes)
+            offset += limit
+
+        return result
