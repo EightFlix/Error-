@@ -96,6 +96,12 @@ async def cb_handler(client: Client, query: CallbackQuery):
     data = query.data
     uid = query.from_user.id
 
+    # --------------------------------------------------
+    # ❗ IGNORE PAGINATION (handled in filter.py)
+    # --------------------------------------------------
+    if data.startswith("page#") or data == "pages":
+        return await query.answer()
+
     # ==================================================
     # ❌ CLOSE (OWNER ONLY)
     # ==================================================
@@ -106,7 +112,10 @@ async def cb_handler(client: Client, query: CallbackQuery):
 
         # ---- ownership validation ----
         if mem and mem.get("owner") != uid:
-            return await query.answer("❌ Not your file", show_alert=True)
+            return await query.answer(
+                "❌ This file is not for you",
+                show_alert=True
+            )
 
         # ---- PM FILE CLEANUP ----
         mem = temp.FILES.pop(uid, None)
@@ -135,10 +144,6 @@ async def cb_handler(client: Client, query: CallbackQuery):
             pass
         return
 
-    # ---------------- IGNORE ----------------
-    if data == "pages":
-        return await query.answer()
-
     # ==================================================
     # ▶️ STREAM (OWNER + PREMIUM)
     # ==================================================
@@ -159,6 +164,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
             )
 
         file_id = data.split("#", 1)[1]
+
         msg = await client.send_cached_media(
             chat_id=BIN_CHANNEL,
             file_id=file_id
