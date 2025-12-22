@@ -13,6 +13,7 @@ from info import ADMINS, IS_PREMIUM, TIME_ZONE
 from database.users_chats_db import db
 from shortzy import Shortzy
 
+
 # =========================
 # OPTIONAL SHORTLINK
 # =========================
@@ -38,10 +39,9 @@ class temp(object):
     SETTINGS = {}
     VERIFICATIONS = {}
 
-    FILES = {}
-    PREMIUM = {}   # ⚡ RAM premium cache
-
-    KEYWORDS = {}  # 🔥 auto-learn search keywords
+    FILES = {}          # msg_id -> data
+    PREMIUM = {}        # ⚡ RAM premium cache
+    KEYWORDS = {}       # 🧠 auto-learned keywords
 
     INDEX_STATS = {
         "running": False,
@@ -58,11 +58,11 @@ class temp(object):
 # ======================================================
 
 GRACE_PERIOD = timedelta(minutes=20)
-PREMIUM_CACHE_TTL = 300  # 5 min
+PREMIUM_CACHE_TTL = 300   # 5 minutes
 
 
 # ======================================================
-# ⚡ ULTRA FAST PREMIUM CHECK
+# ⚡ ULTRA FAST PREMIUM CHECK (RAM → DB)
 # ======================================================
 
 async def is_premium(user_id, bot=None) -> bool:
@@ -72,13 +72,18 @@ async def is_premium(user_id, bot=None) -> bool:
     now_ts = time.time()
     cached = temp.PREMIUM.get(user_id)
 
+    # ---- RAM CACHE ----
     if cached and now_ts - cached["checked_at"] < PREMIUM_CACHE_TTL:
         expire = cached["expire"]
         return bool(expire and datetime.utcnow() <= expire + GRACE_PERIOD)
 
+    # ---- DB FALLBACK ----
     plan = db.get_plan(user_id)
     if not plan or not plan.get("premium"):
-        temp.PREMIUM[user_id] = {"expire": None, "checked_at": now_ts}
+        temp.PREMIUM[user_id] = {
+            "expire": None,
+            "checked_at": now_ts
+        }
         return False
 
     expire = plan.get("expire")
@@ -93,15 +98,115 @@ async def is_premium(user_id, bot=None) -> bool:
             "last_reminder": "expired"
         })
         db.update_plan(user_id, plan)
-        temp.PREMIUM[user_id] = {"expire": None, "checked_at": now_ts}
+        temp.PREMIUM[user_id] = {
+            "expire": None,
+            "checked_at": now_ts
+        }
         return False
 
-    temp.PREMIUM[user_id] = {"expire": expire, "checked_at": now_ts}
+    temp.PREMIUM[user_id] = {
+        "expire": expire,
+        "checked_at": now_ts
+    }
     return True
 
 
 # ======================================================
-# 🧠 SMART SEARCH LEARNING + SUGGESTIONS
+# 🛡 PREMIUM AUTO DOWNGRADE WATCHER
+# ======================================================
+
+async def check_premium(bot):
+    while True:
+        try:
+            now = datetime.utcnow()
+
+            for u in db.get_premium_users():
+                uid = u["id"]
+                if uid in ADMINS:
+                    continue
+
+                plan = u.get("plan", {})
+                expire = plan.get("expire")
+                if not expire:
+                    continue
+
+                if isinstance(expire, (int, float)):
+                    expire = datetime.utcfromtimestamp(expire)
+
+                if now > expire + GRACE_PERIOD:
+                    plan.update({
+                        "premium": False,
+                        "expire": "",
+                        "plan": ""
+                    })
+                    db.update_plan(uid, plan)
+
+                    # clear RAM cache
+                    temp.PREMIUM.pop(uid, None)
+
+        except Exception:
+            pass
+
+        await asyncio.sleep(1800)  # 30 min
+
+
+# ======================================================
+# 🔔 SMART PREMIUM EXPIRY REMINDER
+# ======================================================
+
+REMINDER_STEPS = [
+    ("1d", timedelta(days=1)),
+    ("6h", timedelta(hours=6)),
+    ("1h", timedelta(hours=1))
+]
+
+async def premium_expiry_reminder(bot):
+    while True:
+        try:
+            now = datetime.utcnow()
+
+            for user in db.get_premium_users():
+                uid = user["id"]
+                if uid in ADMINS:
+                    continue
+
+                plan = user.get("plan", {})
+                expire = plan.get("expire")
+                last = plan.get("last_reminder")
+
+                if not expire:
+                    continue
+
+                if isinstance(expire, (int, float)):
+                    expire = datetime.utcfromtimestamp(expire)
+
+                for tag, delta in REMINDER_STEPS:
+                    if last == tag:
+                        continue
+
+                    if expire - delta <= now < expire:
+                        try:
+                            await bot.send_message(
+                                uid,
+                                f"⏰ **Premium Expiry Alert**\n\n"
+                                f"Your premium will expire in **{tag}**.\n"
+                                "Renew now to avoid interruption."
+                            )
+                        except:
+                            pass
+
+                        plan["last_reminder"] = tag
+                        db.update_plan(uid, plan)
+                        break
+
+        except Exception:
+            pass
+
+        await asyncio.sleep(1800)
+
+
+# ======================================================
+# 🧠 SMART SEARCH LEARNING (OFFLINE)
 # ======================================================
 
 def learn_keywords(text: str):
@@ -136,7 +241,7 @@ def suggest_query(query: str):
 
 
 # ======================================================
-# 🎉 FESTIVAL GREETING (OFFLINE)
+# 🎉 FESTIVAL + SMART GREETING
 # ======================================================
 
 FESTIVALS = {
@@ -151,18 +256,14 @@ FESTIVAL_MSG = {
     "eid": "🌙 Eid Mubarak | ईद मुबारक"
 }
 
+EMOJI_DAY = ["🌞", "✨", "🌤"]
+EMOJI_NIGHT = ["🌙", "⭐", "😴"]
+
 
 def detect_festival():
     now = datetime.now(pytz.timezone(TIME_ZONE))
     return FESTIVALS.get((now.month, now.day))
 
-
-# ======================================================
-# 🎭 SMART GREETING SYSTEM
-# ======================================================
-
-EMOJI_DAY = ["🌞", "🌤", "✨"]
-EMOJI_NIGHT = ["🌙", "⭐", "😴"]
 
 def get_wish(user_name: str = None):
     fest = detect_festival()
@@ -187,11 +288,15 @@ async def cleanup_files_memory():
     while True:
         try:
             now = int(time.time())
-            expired = [k for k, v in temp.FILES.items() if v.get("expire", 0) <= now]
+            expired = [
+                k for k, v in temp.FILES.items()
+                if v.get("expire", 0) <= now
+            ]
             for k in expired:
                 temp.FILES.pop(k, None)
         except:
             pass
+
         await asyncio.sleep(60)
 
 
@@ -203,8 +308,8 @@ async def generate_qr_code(data: str):
     qr = qrcode.QRCode(box_size=10, border=4)
     qr.add_data(data)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
 
+    img = qr.make_image(fill_color="black", back_color="white")
     bio = BytesIO()
     bio.name = "qr.png"
     img.save(bio, "PNG")
@@ -224,7 +329,7 @@ async def get_shortlink(url, api, link):
 
 
 # ======================================================
-# 🧰 UTILITIES
+# 🧰 SMALL UTILITIES
 # ======================================================
 
 def get_size(size):
