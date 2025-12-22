@@ -39,12 +39,12 @@ class temp(object):
     SETTINGS = {}
     VERIFICATIONS = {}
 
-    FILES = {}
-    PREMIUM = {}
-    KEYWORDS = {}
+    FILES = {}          # msg_id -> delivery data
+    PREMIUM = {}        # RAM premium cache
+    KEYWORDS = {}       # learned keywords (RAM)
 
-    LANG_USER = {}
-    LANG_GROUP = {}
+    LANG_USER = {}      # user_id -> hi/en
+    LANG_GROUP = {}     # group_id -> hi/en
 
     INDEX_STATS = {
         "running": False,
@@ -125,11 +125,7 @@ async def check_premium(bot):
                     expire = datetime.utcfromtimestamp(expire)
 
                 if now > expire + GRACE_PERIOD:
-                    plan.update({
-                        "premium": False,
-                        "expire": "",
-                        "plan": ""
-                    })
+                    plan.update({"premium": False, "expire": "", "plan": ""})
                     db.update_plan(uid, plan)
                     temp.PREMIUM.pop(uid, None)
         except:
@@ -190,7 +186,7 @@ async def premium_expiry_reminder(bot):
 
 
 # ======================================================
-# ✅ VERIFY SYSTEM (RESTORED)
+# ✅ VERIFY SYSTEM (inline.py dependency)
 # ======================================================
 
 async def get_verify_status(user_id: int):
@@ -219,22 +215,17 @@ def learn_keywords(text: str):
 def fast_similarity(a: str, b: str) -> int:
     if a == b:
         return 100
-    a_set = set(a.split())
-    b_set = set(b.split())
+    a_set, b_set = set(a.split()), set(b.split())
     common = a_set & b_set
     if not common:
         return 0
     score = int((len(common) / max(len(a_set), len(b_set))) * 100)
-    for x in a_set:
-        for y in b_set:
-            if x.startswith(y) or y.startswith(x):
-                score += 10
     return min(score, 100)
 
 
 def suggest_query(query: str):
     best, score = None, 0
-    for k in temp.KEYWORDS.keys():
+    for k in temp.KEYWORDS:
         s = fast_similarity(query, k)
         if s > score:
             best, score = k, s
@@ -245,18 +236,18 @@ def suggest_query(query: str):
 # 🌍 LANGUAGE SYSTEM
 # ======================================================
 
-def set_user_lang(user_id: int, lang: str):
+def set_user_lang(user_id, lang):
     temp.LANG_USER[user_id] = lang
 
 
-def set_group_lang(group_id: int, lang: str):
+def set_group_lang(group_id, lang):
     temp.LANG_GROUP[group_id] = lang
 
 
 def get_lang(user_id=None, group_id=None, default="en"):
-    if user_id and user_id in temp.LANG_USER:
+    if user_id in temp.LANG_USER:
         return temp.LANG_USER[user_id]
-    if group_id and group_id in temp.LANG_GROUP:
+    if group_id in temp.LANG_GROUP:
         return temp.LANG_GROUP[group_id]
     return default
 
@@ -328,10 +319,7 @@ async def broadcast_messages(user_id, message, pin=False):
     try:
         msg = await message.copy(chat_id=user_id)
         if pin:
-            try:
-                await msg.pin(both_sides=True)
-            except:
-                pass
+            await msg.pin(both_sides=True)
         return "Success"
     except FloodWait as e:
         await asyncio.sleep(e.value)
@@ -348,10 +336,7 @@ async def groups_broadcast_messages(chat_id, message, pin=False):
     try:
         msg = await message.copy(chat_id=chat_id)
         if pin:
-            try:
-                await msg.pin()
-            except:
-                pass
+            await msg.pin()
         return "Success"
     except FloodWait as e:
         await asyncio.sleep(e.value)
@@ -362,6 +347,37 @@ async def groups_broadcast_messages(chat_id, message, pin=False):
         except:
             pass
         return "Error"
+
+
+# ======================================================
+# 🔔 FORCE SUB CHECK (inline.py fix)
+# ======================================================
+
+async def is_subscribed(bot, query):
+    buttons = []
+
+    try:
+        if await is_premium(query.from_user.id, bot):
+            return buttons
+    except:
+        pass
+
+    stg = db.get_bot_sttgs()
+    if not stg or not stg.get("FORCE_SUB_CHANNELS"):
+        return buttons
+
+    for cid in stg["FORCE_SUB_CHANNELS"].split():
+        try:
+            chat = await bot.get_chat(int(cid))
+            await bot.get_chat_member(int(cid), query.from_user.id)
+        except UserNotParticipant:
+            buttons.append(
+                [InlineKeyboardButton(f"📢 Join {chat.title}", url=chat.invite_link)]
+            )
+        except:
+            pass
+
+    return buttons
 
 
 # ======================================================
