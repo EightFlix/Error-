@@ -5,32 +5,22 @@ from hydrogram import Client, filters
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from hydrogram.errors import MessageNotModified
 
-from info import (
-    IS_STREAM,
-    PM_FILE_DELETE_TIME,
-    PROTECT_CONTENT,
-    ADMINS
-)
-
+from info import IS_STREAM, PM_FILE_DELETE_TIME, PROTECT_CONTENT, ADMINS
 from database.ia_filterdb import get_file_details
 from database.users_chats_db import db
-from utils import (
-    get_settings,
-    get_size,
-    get_shortlink,
-    get_readable_time,
-    temp
-)
+from utils import get_settings, get_size, get_shortlink, get_readable_time, temp
+
 
 # ======================================================
 # 🔐 CONFIG
 # ======================================================
 
 GRACE_PERIOD = timedelta(minutes=30)
+RESEND_EXPIRE_TIME = 60  # seconds
 
-# runtime memory
 if not hasattr(temp, "FILES"):
     temp.FILES = {}
+
 
 # ======================================================
 # 🧠 PREMIUM CHECK (WITH GRACE)
@@ -56,7 +46,7 @@ async def has_premium_or_grace(user_id: int) -> bool:
 
 
 # ======================================================
-# ⏱ COUNTDOWN TASK (CAPTION SAFE)
+# ⏱ COUNTDOWN TASK (CAPTION BASED)
 # ======================================================
 
 async def countdown_task(msg_id: int, seconds: int):
@@ -69,12 +59,10 @@ async def countdown_task(msg_id: int, seconds: int):
             if not data:
                 return
 
-            msg = data["file"]
-            base = data["base_caption"]
-
             try:
-                await msg.edit_caption(
-                    base + f"\n\n⚠️ <i>Auto delete in {get_readable_time(seconds)}</i>",
+                await data["file"].edit_caption(
+                    data["base_caption"]
+                    + f"\n\n⚠️ <i>Auto delete in {get_readable_time(seconds)}</i>",
                     reply_markup=data["markup"]
                 )
             except MessageNotModified:
@@ -101,26 +89,21 @@ async def file_button_handler(client: Client, query: CallbackQuery):
     uid = query.from_user.id
     premium_ok = await has_premium_or_grace(uid)
 
-    # ---- FREE → SHORTLINK ----
     if settings.get("shortlink") and not premium_ok:
         link = await get_shortlink(
             settings.get("url"),
             settings.get("api"),
             f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}"
         )
-
         return await query.message.reply_text(
-            f"<b>📁 {file.get('file_name')}</b>\n"
-            f"📦 <b>Size:</b> {get_size(file.get('file_size', 0))}\n\n"
-            "🔓 Unlock below:",
+            f"<b>📁 {file['file_name']}</b>\n"
+            f"📦 <b>Size:</b> {get_size(file['file_size'])}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚀 Get File", url=link)],
-                [InlineKeyboardButton("⚡ Upgrade Premium", callback_data="buy_premium")],
                 [InlineKeyboardButton("❌ Close", callback_data="close_data")]
             ])
         )
 
-    # ---- PREMIUM → PM ----
     await query.answer(
         url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}"
     )
@@ -146,37 +129,26 @@ async def start_file_delivery(client: Client, message):
 
     settings = await get_settings(grp_id)
     uid = message.from_user.id
-    premium_ok = await has_premium_or_grace(uid)
 
-    if settings.get("shortlink") and not premium_ok:
-        return await message.reply(
-            "🔒 Premium required.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⚡ Upgrade Premium", callback_data="buy_premium")]
-            ])
-        )
+    if settings.get("shortlink") and not await has_premium_or_grace(uid):
+        return await message.reply("🔒 Premium required")
 
-    # ==================================================
-    # 🔥 CLEAN OLD FILE (ONE AT A TIME)
-    # ==================================================
-    for k, old in list(temp.FILES.items()):
-        if old.get("owner") == uid:
+    # 🔥 clean previous file of same user
+    for k, v in list(temp.FILES.items()):
+        if v["owner"] == uid:
             try:
-                old["task"].cancel()
+                v["task"].cancel()
             except:
                 pass
             try:
-                await old["file"].delete()
+                await v["file"].delete()
             except:
                 pass
             temp.FILES.pop(k, None)
 
-    # ==================================================
-    # 📄 BASE CAPTION (NO DOUBLE CAPTION)
-    # ==================================================
     caption_tpl = settings.get("caption") or "{file_name}\n\n{file_caption}"
     base_caption = caption_tpl.format(
-        file_name=file.get("file_name", "File"),
+        file_name=file["file_name"],
         file_caption=file.get("caption", "")
     )
 
@@ -192,15 +164,13 @@ async def start_file_delivery(client: Client, message):
     sent = await client.send_cached_media(
         chat_id=uid,
         file_id=file_id,
-        caption=base_caption + f"\n\n⚠️ <i>Auto delete in {get_readable_time(PM_FILE_DELETE_TIME)}</i>",
+        caption=base_caption
+        + f"\n\n⚠️ <i>Auto delete in {get_readable_time(PM_FILE_DELETE_TIME)}</i>",
         protect_content=PROTECT_CONTENT,
         reply_markup=markup
     )
 
-    try:
-        await message.delete()
-    except:
-        pass
+    await message.delete()
 
     task = asyncio.create_task(countdown_task(sent.id, PM_FILE_DELETE_TIME))
 
@@ -213,9 +183,7 @@ async def start_file_delivery(client: Client, message):
         "markup": markup
     }
 
-    # ==================================================
-    # 🗑 FINAL DELETE
-    # ==================================================
+    # ================= FINAL DELETE =================
     await asyncio.sleep(PM_FILE_DELETE_TIME)
 
     data = temp.FILES.pop(sent.id, None)
@@ -226,3 +194,38 @@ async def start_file_delivery(client: Client, message):
         await data["file"].delete()
     except:
         pass
+
+    # 🔁 Resend button (valid 60s)
+    resend_msg = await client.send_message(
+        uid,
+        "⌛ <b>File expired</b>",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔁 Resend File", callback_data=f"resend#{file_id}")]
+        ])
+    )
+
+    await asyncio.sleep(RESEND_EXPIRE_TIME)
+    try:
+        await resend_msg.delete()
+    except:
+        pass
+
+
+# ======================================================
+# 🔁 RESEND HANDLER (NO /START)
+# ======================================================
+
+@Client.on_callback_query(filters.regex(r"^resend#"))
+async def resend_handler(client, query: CallbackQuery):
+    file_id = query.data.split("#", 1)[1]
+    uid = query.from_user.id
+
+    file = await get_file_details(file_id)
+    if not file:
+        return await query.answer("Expired", show_alert=True)
+
+    await query.message.delete()
+    await start_file_delivery(
+        client,
+        query.message.reply_to_message or query.message
+    )
