@@ -10,7 +10,8 @@ from database.ia_filterdb import get_search_results
 from utils import get_size, is_premium, temp
 
 RESULTS_PER_PAGE = 10
-RESULT_EXPIRE_TIME = 300  # 5 minutes
+RESULT_EXPIRE_TIME = 300   # 5 minutes
+EXPIRE_DELETE_DELAY = 60   # delete expired message after 1 min
 
 
 # =====================================================
@@ -27,28 +28,36 @@ async def filter_handler(client, message):
     if len(search) < 2:
         return
 
-    # ---------- GROUP SEARCH ----------
+    # ==============================
+    # 🚫 GROUP SEARCH (STRICT)
+    # ==============================
     if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
         stg = await db.get_settings(message.chat.id)
-        if stg.get("search") is False:
+
+        # 🔴 admin disabled search → FULL STOP
+        if not stg or stg.get("search") is False:
             return
 
+        chat_id = message.chat.id
         source_chat_id = message.chat.id
         source_chat_title = message.chat.title
 
-    # ---------- PM SEARCH ----------
+    # ==============================
+    # 📩 PM SEARCH
+    # ==============================
     else:
+        chat_id = user_id
         source_chat_id = 0
         source_chat_title = ""
 
-        # 🔥 SIMPLE + SAFE PM PREMIUM CHECK (NO DB SETTINGS)
         if user_id not in ADMINS:
             if not await is_premium(user_id, client):
                 return
 
     await send_results(
         client=client,
-        user_id=user_id,
+        chat_id=chat_id,
+        owner=user_id,
         search=search,
         offset=0,
         source_chat_id=source_chat_id,
@@ -61,7 +70,8 @@ async def filter_handler(client, message):
 # =====================================================
 async def send_results(
     client,
-    user_id,
+    chat_id,
+    owner,
     search,
     offset,
     source_chat_id,
@@ -78,60 +88,47 @@ async def send_results(
         text = f"❌ <b>No results found for:</b>\n<code>{search}</code>"
         if message:
             return await message.edit_text(text, parse_mode=enums.ParseMode.HTML)
-        return await client.send_message(user_id, text, parse_mode=enums.ParseMode.HTML)
+        return await client.send_message(chat_id, text, parse_mode=enums.ParseMode.HTML)
 
-    # -------- PAGE INFO --------
     page = (offset // RESULTS_PER_PAGE) + 1
     total_pages = ceil(total / RESULTS_PER_PAGE)
 
-    start = offset + 1
-    end = offset + len(files)
-
-    # -------- HEADER --------
     text = (
         f"🔎 <b>Search :</b> <code>{search}</code>\n"
         f"🎬 <b>Total Files :</b> <code>{total}</code>\n"
         f"📄 <b>Page :</b> <code>{page} / {total_pages}</code>\n\n"
     )
 
-    # -------- FILE LIST (LINE GAP FIX) --------
+    # -------- FILE LIST (WITH GAP) --------
     for f in files:
         size = get_size(f["file_size"])
         link = f"https://t.me/{temp.U_NAME}?start=file_{source_chat_id}_{f['_id']}"
         text += f"📁 <a href='{link}'>[{size}] {f['file_name']}</a>\n\n"
 
-    text += f"<b>Showing :</b> {start}-{end}"
-
     if source_chat_title:
-        text += f"\n\n<b>Powered By :</b> {source_chat_title}"
+        text += f"<b>Powered By :</b> {source_chat_title}"
 
-    # -------- BUTTONS (OWNER BOUND) --------
-    owner = user_id
+    # -------- PAGINATION BUTTONS --------
     nav = []
 
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "⬅️ Prev",
+                "◀️ Prev",
                 callback_data=f"page#{search}#{offset-RESULTS_PER_PAGE}#{source_chat_id}#{owner}"
             )
         )
-    else:
-        nav.append(InlineKeyboardButton("⛔ Prev", callback_data="pages"))
 
     if next_offset:
         nav.append(
             InlineKeyboardButton(
-                "Next ➡️",
+                "Next ▶️",
                 callback_data=f"page#{search}#{offset+RESULTS_PER_PAGE}#{source_chat_id}#{owner}"
             )
         )
-    else:
-        nav.append(InlineKeyboardButton("Next ⛔", callback_data="pages"))
 
-    markup = InlineKeyboardMarkup([nav])
+    markup = InlineKeyboardMarkup([nav]) if nav else None
 
-    # -------- SEND / EDIT --------
     if message:
         await message.edit_text(
             text,
@@ -141,17 +138,17 @@ async def send_results(
         )
     else:
         msg = await client.send_message(
-            user_id,
+            chat_id,
             text,
             reply_markup=markup,
             disable_web_page_preview=True,
             parse_mode=enums.ParseMode.HTML
         )
-        asyncio.create_task(auto_expire(msg))
+        asyncio.create_task(auto_expire(msg, owner))
 
 
 # =====================================================
-# 🔁 PAGINATION CALLBACK (OWNER VALIDATION)
+# 🔁 PAGINATION CALLBACK (OWNER ONLY)
 # =====================================================
 @Client.on_callback_query(filters.regex("^page#"))
 async def pagination_handler(client, query):
@@ -161,12 +158,8 @@ async def pagination_handler(client, query):
     source_chat_id = int(source_chat_id)
     owner = int(owner)
 
-    # 🔐 OWNER CHECK
     if query.from_user.id != owner and query.from_user.id not in ADMINS:
-        return await query.answer(
-            "❌ This result is not for you",
-            show_alert=True
-        )
+        return await query.answer("❌ Not your result", show_alert=True)
 
     if source_chat_id:
         try:
@@ -181,7 +174,8 @@ async def pagination_handler(client, query):
 
     await send_results(
         client=client,
-        user_id=owner,
+        chat_id=query.message.chat.id,
+        owner=owner,
         search=search,
         offset=offset,
         source_chat_id=source_chat_id,
@@ -191,12 +185,23 @@ async def pagination_handler(client, query):
 
 
 # =====================================================
-# ⏱ AUTO EXPIRE RESULTS
+# ⏱ AUTO EXPIRE (FULL CLEAN)
 # =====================================================
-async def auto_expire(message):
+async def auto_expire(message, owner):
     await asyncio.sleep(RESULT_EXPIRE_TIME)
+
     try:
         await message.edit_reply_markup(None)
-        await message.reply("⌛ <i>This result has expired.</i>")
+        await message.edit_text("⌛ <i>This result has expired.</i>")
+    except:
+        return
+
+    # 🔒 block callbacks after expire
+    temp.EXPIRED = temp.EXPIRED if hasattr(temp, "EXPIRED") else set()
+    temp.EXPIRED.add(message.id)
+
+    await asyncio.sleep(EXPIRE_DELETE_DELAY)
+    try:
+        await message.delete()
     except:
         pass
