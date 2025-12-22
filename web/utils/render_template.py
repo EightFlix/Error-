@@ -1,232 +1,227 @@
+import urllib.parse
+import html
+
 from info import BIN_CHANNEL, URL
 from utils import temp
-from web.utils.custom_dl import TGCustomYield
-import urllib.parse
-import aiofiles, html
 
 
-# styles from deepseek.com
-watch_tmplt = """
+WATCH_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta property="og:image" content="https://i.ibb.co/M8S0Zzj/live-streaming.png" itemprop="thumbnailUrl">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{heading}</title>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-    <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
-    <style>
-        :root {
-            --primary: #818cf8;
-            --primary-hover: #6366f1;
-            --text-primary: #f8fafc;
-            --text-secondary: #94a3b8;
-            --bg-color: #0f172a;
-            --player-bg: #1e293b;
-            --footer-bg: #1e293b;
-            --border-color: #334155;
-        }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-primary);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
-        
-        header {
-            padding: 1rem;
-            background-color: var(--player-bg);
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-            position: sticky;
-            top: 0;
-            z-index: 10;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-        
-        #file-name {
-            font-size: 1.1rem;
-            font-weight: 600;
-            color: var(--text-primary);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 80%;
-            text-align: center;
-        }
-        
-        .container {
-            flex: 1;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 2rem;
-            width: 100%;
-        }
-        
-        .player-container {
-            width: 100%;
-            max-width: 1200px;
-            background-color: var(--player-bg);
-            border-radius: 0.5rem;
-            overflow: hidden;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        }
-        
-        .action-buttons {
-            display: flex;
-            justify-content: center;
-            gap: 1rem;
-            margin-top: 1rem;
-            padding: 0 1rem;
-        }
-        
-        .action-btn {
-            background-color: var(--primary);
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 0.25rem;
-            font-weight: 500;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            text-decoration: none;
-            transition: background-color 0.2s;
-        }
-        
-        .action-btn:hover {
-            background-color: var(--primary-hover);
-        }
-        
-        footer {
-            padding: 1rem;
-            text-align: center;
-            background-color: var(--footer-bg);
-            color: var(--text-secondary);
-            font-size: 0.875rem;
-            border-top: 1px solid var(--border-color);
-        }
-        
-        @media (max-width: 768px) {
-            #file-name {
-                font-size: 0.9rem;
-                max-width: 90%;
-            }
-            
-            .container {
-                padding: 1rem;
-            }
-            
-            .action-buttons {
-                flex-direction: column;
-                gap: 0.5rem;
-            }
-        }
-        
-        /* Plyr overrides */
-        .plyr--video .plyr__control--overlaid {
-            background: var(--primary);
-        }
-        
-        .plyr--video .plyr__control:hover, 
-        .plyr--video .plyr__control[aria-expanded="true"] {
-            background: var(--primary-hover);
-        }
-        
-        .plyr__control.plyr__tab-focus {
-            box-shadow: 0 0 0 5px rgba(99, 102, 241, 0.5);
-        }
-        
-        .plyr--full-ui input[type="range"] {
-            color: var(--primary);
-        }
-        
-        .plyr__menu__container .plyr__control[role="menuitemradio"][aria-checked="true"]::before {
-            background: var(--primary);
-        }
-    </style>
-</head>
-<body class="dark">
-    <header>
-        <div id="file-name">{file_name}</div>
-    </header>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title}</title>
 
-    <div class="container">
-        <div class="player-container">
-            <video src="{src}" class="player" playsinline controls></video>
-            <div class="action-buttons">
-                <a href="{src}" class="action-btn" download>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
-                    </svg>
-                    Download
-                </a>
-                <a href="vlc://{src}" class="action-btn">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
-                    </svg>
-                    Play in VLC
-                </a>
-            </div>
+<link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css"/>
+
+<style>
+:root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --text: #0f172a;
+    --muted: #64748b;
+    --accent: #ef4444;
+    --btn: #e5e7eb;
+}
+
+body.dark {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #f8fafc;
+    --muted: #94a3b8;
+    --btn: #111827;
+}
+
+* {
+    box-sizing: border-box;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+}
+
+header {
+    padding: 14px 16px;
+    background: var(--card);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 700;
+}
+
+.brand {
+    color: var(--accent);
+    font-size: 18px;
+}
+
+.toggle {
+    cursor: pointer;
+    font-size: 18px;
+}
+
+.container {
+    max-width: 880px;
+    margin: auto;
+    padding: 14px;
+}
+
+.card {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 14px;
+    border: 1px solid #e5e7eb;
+}
+
+body.dark .card {
+    border-color: #334155;
+}
+
+video {
+    width: 100%;
+    border-radius: 10px;
+    background: black;
+}
+
+.title {
+    margin-top: 12px;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+.tags {
+    margin: 8px 0;
+}
+
+.tag {
+    display: inline-block;
+    padding: 3px 10px;
+    font-size: 12px;
+    border-radius: 999px;
+    background: rgba(239,68,68,.12);
+    color: var(--accent);
+    margin-right: 6px;
+}
+
+.actions {
+    margin-top: 12px;
+    display: grid;
+    gap: 10px;
+}
+
+.btn {
+    padding: 11px;
+    text-align: center;
+    border-radius: 8px;
+    font-weight: 600;
+    background: var(--btn);
+    color: var(--text);
+    text-decoration: none;
+}
+
+.btn.primary {
+    background: var(--accent);
+    color: #fff;
+}
+
+.note {
+    margin-top: 12px;
+    padding: 10px;
+    background: rgba(0,0,0,.05);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--muted);
+    text-align: center;
+}
+
+footer {
+    margin: 18px 0;
+    text-align: center;
+    font-size: 12px;
+    color: var(--muted);
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    <div class="brand">FAST FINDER</div>
+    <div class="toggle" onclick="toggleMode()">🌙</div>
+</header>
+
+<div class="container">
+    <div class="card">
+
+        <video class="player" controls playsinline src="{src}"></video>
+
+        <div class="title">{file_name}</div>
+
+        <div class="tags">
+            <span class="tag">STREAM</span>
+            <span class="tag">FAST</span>
+            <span class="tag">NO ADS</span>
         </div>
+
+        <div class="actions">
+            <a class="btn primary" href="{src}" download>⬇ Direct Download</a>
+            <a class="btn" href="vlc://{src}">▶ Play in VLC</a>
+        </div>
+
+        <div class="note">
+            If video not playing, use VLC or MX Player.
+        </div>
+
     </div>
 
     <footer>
-        <p>Video not playing? Your browser might not support the codec. Please try downloading the file or playing in VLC.</p>
+        © 2025 Fast Finder Bot
     </footer>
+</div>
 
-    <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            // Initialize Plyr player
-            const player = new Plyr('.player', {
-                controls: [
-                    'play-large',
-                    'play',
-                    'progress',
-                    'current-time',
-                    'duration',
-                    'mute',
-                    'volume',
-                    'captions',
-                    'settings',
-                    'pip',
-                    'airplay',
-                    'fullscreen'
-                ],
-                settings: ['captions', 'quality', 'speed'],
-                hideControls: false
-            });
-        });
-    </script>
+<script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
+<script>
+new Plyr('.player');
+
+function toggleMode(){
+    document.body.classList.toggle("dark");
+    localStorage.setItem("mode",
+        document.body.classList.contains("dark") ? "dark" : "light"
+    );
+}
+
+(function(){
+    if(localStorage.getItem("mode")==="dark"){
+        document.body.classList.add("dark");
+    }
+})();
+</script>
+
 </body>
 </html>
 """
 
-async def media_watch(message_id):
+
+async def media_watch(message_id: int):
     media_msg = await temp.BOT.get_messages(BIN_CHANNEL, message_id)
+
+    if not media_msg or not media_msg.media:
+        return "<h1>File not found</h1>"
+
     media = getattr(media_msg, media_msg.media.value, None)
-    src = urllib.parse.urljoin(URL, f'download/{message_id}')
-    tag = media.mime_type.split('/')[0].strip()
-    if tag == 'video':
-        heading = html.escape(f'Watch - {media.file_name}')
-        html_ = watch_tmplt.replace('{heading}', heading).replace('{file_name}', media.file_name).replace('{src}', src)
-    else:
-        html_ = '<h1>This is not streamable file</h1>'
-    return html_
+
+    if not media or not media.mime_type.startswith("video"):
+        return "<h1>This file is not streamable</h1>"
+
+    src = urllib.parse.urljoin(URL, f"download/{message_id}")
+    file_name = html.escape(media.file_name or "Video")
+
+    return (
+        WATCH_TEMPLATE
+        .replace("{title}", f"Watch - {file_name}")
+        .replace("{file_name}", file_name)
+        .replace("{src}", src)
+    )
