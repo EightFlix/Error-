@@ -1,11 +1,17 @@
 import logging
+
+# ==========================
+# 🔥 LOGGING CONFIG (KOYEB FRIENDLY)
+# ==========================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     handlers=[logging.StreamHandler()]
 )
+
 logging.getLogger("hydrogram").setLevel(logging.ERROR)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("XFILER")
+
 
 import os
 import time
@@ -14,7 +20,7 @@ import uvloop
 from datetime import datetime
 import pytz
 
-from hydrogram import Client
+from hydrogram import Client, filters
 from aiohttp import web
 
 from web import web_app
@@ -23,7 +29,7 @@ from info import API_ID, API_HASH, BOT_TOKEN, PORT, LOG_CHANNEL, ADMINS
 from utils import (
     temp,
     cleanup_files_memory,
-    premium_expiry_reminder   # 🔔 SMART REMINDER
+    premium_expiry_reminder
 )
 
 from database.users_chats_db import db
@@ -37,6 +43,18 @@ IST = pytz.timezone("Asia/Kolkata")
 
 def ist_time():
     return datetime.now(IST).strftime("%d %b %Y, %I:%M %p")
+
+
+# ==========================
+# 🧪 GLOBAL DEBUG: /START LOGGER
+# ==========================
+@Client.on_message(filters.private & filters.command("start"))
+async def debug_start_logger(client, message):
+    logger.warning(
+        f"/START HIT | user={message.from_user.id} | text='{message.text}'"
+    )
+    # ⚠️ DO NOT reply, DO NOT delete here
+    # This is ONLY for logs
 
 
 # ==========================
@@ -92,7 +110,7 @@ class Bot(Client):
         # 🔥 FILE MEMORY LEAK GUARD
         asyncio.create_task(cleanup_files_memory())
 
-        # 🔔 SMART PREMIUM EXPIRY REMINDERS
+        # 🔔 PREMIUM EXPIRY REMINDER
         asyncio.create_task(premium_expiry_reminder(self))
 
         # 🚫 AUTO UNBAN WORKER
