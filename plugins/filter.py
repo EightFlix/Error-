@@ -88,19 +88,20 @@ async def send_results(
     start = offset + 1
     end = offset + len(files)
 
-    # -------- TEXT --------
+    # -------- HEADER --------
     text = (
         f"🔎 <b>Search :</b> <code>{search}</code>\n"
         f"🎬 <b>Total Files :</b> <code>{total}</code>\n"
         f"📄 <b>Page :</b> <code>{page} / {total_pages}</code>\n\n"
     )
 
+    # -------- FILE LIST (LINE GAP FIX) --------
     for f in files:
         size = get_size(f["file_size"])
         link = f"https://t.me/{temp.U_NAME}?start=file_{source_chat_id}_{f['_id']}"
-        text += f"📁 <a href='{link}'>[{size}] {f['file_name']}</a>\n"
+        text += f"📁 <a href='{link}'>[{size}] {f['file_name']}</a>\n\n"
 
-    text += f"\n<b>Showing :</b> {start}-{end}"
+    text += f"<b>Showing :</b> {start}-{end}"
 
     if source_chat_title:
         text += f"\n\n<b>Powered By :</b> {source_chat_title}"
@@ -109,7 +110,7 @@ async def send_results(
     buttons = []
     nav = []
 
-    owner = user_id  # 🔐 bind owner
+    owner = user_id
 
     if offset > 0:
         nav.append(
@@ -150,7 +151,6 @@ async def send_results(
             disable_web_page_preview=True,
             parse_mode=enums.ParseMode.HTML
         )
-
         asyncio.create_task(auto_expire(msg))
 
 
