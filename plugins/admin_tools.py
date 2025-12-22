@@ -13,6 +13,7 @@ from database.users_chats_db import db
 from database.ia_filterdb import db_count_documents, delete_files
 from utils import get_size, get_readable_time, temp
 
+
 # ======================================================
 # 🧠 LIVE DASHBOARD CONFIG
 # ======================================================
@@ -20,8 +21,17 @@ from utils import get_size, get_readable_time, temp
 DASH_REFRESH = 45  # seconds
 DASH_CACHE = {}   # admin_id -> (text, ts)
 
+# ensure index stats exists (SAFE)
+if not hasattr(temp, "INDEX_STATS"):
+    temp.INDEX_STATS = {
+        "running": False,
+        "start": 0,
+        "saved": 0
+    }
+
+
 # ======================================================
-# 🛡 SAFE EDIT (FIX MESSAGE_NOT_MODIFIED)
+# 🛡 SAFE EDIT (NO MESSAGE_NOT_MODIFIED)
 # ======================================================
 
 async def safe_edit(msg, text, **kwargs):
@@ -33,6 +43,7 @@ async def safe_edit(msg, text, **kwargs):
         pass
     except Exception:
         pass
+
 
 # ======================================================
 # 📊 DASHBOARD BUILDER
@@ -68,12 +79,13 @@ async def build_dashboard():
     now = datetime.now().strftime("%d %b %Y, %I:%M %p")
 
     # ---- live indexing stats ----
-    idx = temp.INDEX_STATS if hasattr(temp, "INDEX_STATS") else {}
-    idx_text = "❌ Not running"
+    idx = temp.INDEX_STATS
     if idx.get("running"):
         dur = max(1, time.time() - idx.get("start", time.time()))
         speed = idx.get("saved", 0) / dur
         idx_text = f"🚀 {speed:.2f} files/sec"
+    else:
+        idx_text = "❌ Not running"
 
     return (
         "📊 <b>LIVE ADMIN DASHBOARD</b>\n\n"
@@ -86,6 +98,7 @@ async def build_dashboard():
         f"⏱ <b>Uptime</b>       : <code>{uptime}</code>\n"
         f"🔄 <b>Updated</b>      : <code>{now}</code>"
     )
+
 
 # ======================================================
 # 🎛 DASHBOARD BUTTONS
@@ -109,8 +122,9 @@ def dashboard_buttons():
         ]
     )
 
+
 # ======================================================
-# 🚀 OPEN DASHBOARD
+# 🚀 OPEN DASHBOARD (/admin, /dashboard)
 # ======================================================
 
 @Client.on_message(filters.command(["admin", "dashboard"]) & filters.user(ADMINS))
@@ -122,6 +136,7 @@ async def open_dashboard(bot, message):
         disable_web_page_preview=True
     )
     DASH_CACHE[message.from_user.id] = (text, time.time())
+
 
 # ======================================================
 # 🔁 DASHBOARD CALLBACKS
@@ -193,6 +208,7 @@ async def dashboard_callbacks(bot, query: CallbackQuery):
 
     await query.answer()
 
+
 # ======================================================
 # 🩺 PREMIUM HEALTH
 # ======================================================
@@ -240,6 +256,7 @@ async def run_premium_health(auto_fix=False):
         f"✅ Fixed         : <code>{fixed}</code>\n\n"
         f"🕒 Checked At    : <code>{now.strftime('%d %b %Y, %I:%M %p')}</code>"
     )
+
 
 # ======================================================
 # 🗑 SAFE DELETE
