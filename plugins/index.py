@@ -1,476 +1,368 @@
-import logging
-import re
-import base64
-import time
-from struct import pack
+import asyncio
 from datetime import datetime
-from typing import List, Tuple, Optional, Dict, Any
+from hydrogram import Client, filters
+from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from hydrogram.errors import FloodWait, MessageNotModified
 
-from hydrogram.file_id import FileId
-from pymongo import MongoClient, TEXT, ASCENDING
-from pymongo.errors import DuplicateKeyError, OperationFailure
-
-from info import (
-    DATA_DATABASE_URL,
-    DATABASE_NAME,
-    COLLECTION_NAME,
-    MAX_BTN,
-    USE_CAPTION_FILTER
-)
-
-logger = logging.getLogger(__name__)
+from info import ADMINS
+from database.ia_filterdb import save_file
 
 # =====================================================
-# 📦 DATABASE CONNECTION
+# STATE TRACKING
 # =====================================================
-try:
-    client = MongoClient(
-        DATA_DATABASE_URL,
-        serverSelectionTimeoutMS=5000,
-        connectTimeoutMS=5000,
-        socketTimeoutMS=5000
+INDEXING_STATE = {}
+
+# =====================================================
+# MANUAL INDEX COMMAND
+# =====================================================
+@Client.on_message(filters.command("index") & filters.private)
+async def index_command(bot: Client, message: Message):
+    """Manual indexing command - /index"""
+    uid = message.from_user.id
+    
+    # Admin check
+    if uid not in ADMINS:
+        return await message.reply("❌ This is an admin-only command!")
+    
+    # Show options
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("1️⃣ Channel Post Link", callback_data="idx#link")],
+        [InlineKeyboardButton("2️⃣ Forward Message", callback_data="idx#forward")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="idx#cancel")]
+    ])
+    
+    await message.reply(
+        "📑 **Manual Indexing**\n\n"
+        "**Send me one of the following:**\n"
+        "1️⃣ Channel post link (https://t.me/c/...)\n"
+        "2️⃣ Forward any message from the channel\n\n"
+        "⏱ **Timeout:** 60 seconds",
+        reply_markup=buttons
     )
-    db = client[DATABASE_NAME]
-    collection = db[COLLECTION_NAME]
-    # Test connection
-    client.server_info()
-    logger.info("✅ Database connected successfully")
-except Exception as e:
-    logger.error(f"❌ Database connection failed: {e}")
-    raise
+    
+    # Set state
+    INDEXING_STATE[uid] = {
+        "active": True,
+        "method": None,
+        "timestamp": datetime.utcnow()
+    }
+    
+    # Auto timeout after 60 seconds
+    asyncio.create_task(auto_timeout(uid))
 
 # =====================================================
-# 🚀 SAFE INDEX SETUP
+# AUTO TIMEOUT
 # =====================================================
-def ensure_indexes(col) -> None:
-    """Create necessary indexes if they don't exist"""
+async def auto_timeout(uid: int):
+    """Auto-remove state after timeout"""
+    await asyncio.sleep(60)
+    if uid in INDEXING_STATE:
+        INDEXING_STATE.pop(uid, None)
+
+# =====================================================
+# CALLBACK HANDLER
+# =====================================================
+@Client.on_callback_query(filters.regex("^idx#"))
+async def index_callback(bot: Client, query):
+    """Handle indexing option callbacks"""
+    uid = query.from_user.id
+    
+    # Admin check
+    if uid not in ADMINS:
+        return await query.answer("❌ Admin only!", show_alert=True)
+    
+    data = query.data.split("#")[1]
+    
+    if data == "cancel":
+        INDEXING_STATE.pop(uid, None)
+        await query.message.edit("❌ Indexing cancelled.")
+        return await query.answer()
+    
+    if data == "link":
+        INDEXING_STATE[uid] = {"active": True, "method": "link"}
+        await query.message.edit(
+            "📎 **Send Channel Post Link**\n\n"
+            "**Example:**\n"
+            "`https://t.me/c/1234567890/123`\n\n"
+            "⏱ **Timeout:** 60 seconds"
+        )
+    
+    elif data == "forward":
+        INDEXING_STATE[uid] = {"active": True, "method": "forward"}
+        await query.message.edit(
+            "📨 **Forward Message**\n\n"
+            "Forward any message from the channel you want to index\n\n"
+            "⏱ **Timeout:** 60 seconds"
+        )
+    
+    await query.answer()
+    asyncio.create_task(auto_timeout(uid))
+
+# =====================================================
+# PROCESS FORWARDED MESSAGE
+# =====================================================
+@Client.on_message(filters.private & filters.forwarded)
+async def process_forwarded(bot: Client, message: Message):
+    """Handle forwarded messages for indexing"""
+    uid = message.from_user.id
+    
+    # Check if user is admin
+    if uid not in ADMINS:
+        return
+    
+    # Check if in indexing mode
+    state = INDEXING_STATE.get(uid)
+    if not state or not state.get("active"):
+        return
+    
+    # Must be from channel
+    if not message.forward_from_chat:
+        return await message.reply("❌ Message must be forwarded from a channel!")
+    
+    channel = message.forward_from_chat
+    
+    # Only channels allowed
+    if channel.type not in ["channel", "supergroup"]:
+        return await message.reply("❌ Must be from a channel or supergroup!")
+    
+    channel_id = channel.id
+    channel_title = channel.title or "Unknown Channel"
+    
+    # Verify bot access
     try:
-        indexes = col.index_information()
+        chat = await bot.get_chat(channel_id)
+        if not chat:
+            return await message.reply("❌ Bot doesn't have access to this channel!")
+    except Exception as e:
+        return await message.reply(f"❌ Cannot access channel:\n`{str(e)[:150]}`")
+    
+    # Clear state and start indexing
+    INDEXING_STATE.pop(uid, None)
+    
+    status = await message.reply(
+        f"⚡ **Starting Indexing**\n\n"
+        f"📢 **Channel:** `{channel_title}`\n"
+        f"🆔 **ID:** `{channel_id}`\n\n"
+        f"⏳ Please wait, this may take a while..."
+    )
+    
+    await run_channel_indexing(bot, status, channel_id, channel_title)
 
-        # Text search index
-        if "file_text_index" not in indexes:
+# =====================================================
+# PROCESS CHANNEL LINK
+# =====================================================
+@Client.on_message(filters.private & filters.text & filters.regex(r"https://t\.me/"))
+async def process_link(bot: Client, message: Message):
+    """Handle channel links for indexing"""
+    uid = message.from_user.id
+    
+    # Check if admin
+    if uid not in ADMINS:
+        return
+    
+    # Check if in indexing mode
+    state = INDEXING_STATE.get(uid)
+    if not state or not state.get("active") or state.get("method") != "link":
+        return
+    
+    text = message.text.strip()
+    
+    # Extract channel ID from link
+    try:
+        if "/c/" in text:
+            # Private channel: https://t.me/c/1234567890/123
+            parts = text.split("/c/")[1].split("/")
+            channel_id = int("-100" + parts[0])
+        else:
+            # Public channel: https://t.me/channelname/123
+            username = text.split("t.me/")[1].split("/")[0]
+            chat = await bot.get_chat(username)
+            channel_id = chat.id
+    except Exception as e:
+        return await message.reply(f"❌ Invalid link format:\n`{str(e)[:150]}`")
+    
+    # Verify access
+    try:
+        chat = await bot.get_chat(channel_id)
+        channel_title = chat.title or "Unknown Channel"
+    except Exception as e:
+        return await message.reply(f"❌ Cannot access channel:\n`{str(e)[:150]}`")
+    
+    # Clear state and start indexing
+    INDEXING_STATE.pop(uid, None)
+    
+    status = await message.reply(
+        f"⚡ **Starting Indexing**\n\n"
+        f"📢 **Channel:** `{channel_title}`\n"
+        f"🆔 **ID:** `{channel_id}`\n\n"
+        f"⏳ Please wait, this may take a while..."
+    )
+    
+    await run_channel_indexing(bot, status, channel_id, channel_title)
+
+# =====================================================
+# MAIN INDEXING LOGIC
+# =====================================================
+async def run_channel_indexing(bot: Client, status: Message, channel_id: int, channel_title: str):
+    """Index all media files from channel"""
+    
+    indexed = 0
+    duplicates = 0
+    errors = 0
+    skipped = 0
+    last_update = 0
+    
+    try:
+        # Iterate through channel history
+        async for msg in bot.get_chat_history(channel_id, limit=None):
+            
+            # Skip non-media messages
+            if not msg.media:
+                skipped += 1
+                continue
+            
+            # Get media object
+            media = None
+            if msg.document:
+                media = msg.document
+            elif msg.video:
+                media = msg.video
+            elif msg.audio:
+                media = msg.audio
+            
+            if not media:
+                skipped += 1
+                continue
+            
+            # Save to database
             try:
-                col.create_index(
-                    [("file_name", TEXT), ("caption", TEXT)],
-                    name="file_text_index",
-                    default_language="english"
-                )
-                logger.info("✅ Text index created")
-            except OperationFailure as e:
-                logger.warning(f"⚠️ Text index skipped: {e}")
-
-        # Quality index for filtering
-        if "quality_idx" not in indexes:
-            col.create_index([("quality", ASCENDING)], name="quality_idx")
-            logger.info("✅ Quality index created")
-
-        # Updated timestamp index
-        if "updated_at_idx" not in indexes:
-            col.create_index([("updated_at", ASCENDING)], name="updated_at_idx")
-            logger.info("✅ Updated_at index created")
-
-    except Exception as e:
-        logger.error(f"❌ Index creation error: {e}")
-
-ensure_indexes(collection)
-
-# =====================================================
-# 📊 DOCUMENT COUNT
-# =====================================================
-def db_count_documents() -> int:
-    """Get approximate document count (fast)"""
-    try:
-        return collection.estimated_document_count()
-    except Exception as e:
-        logger.error(f"Count error: {e}")
-        return 0
-
-# =====================================================
-# ⚡ LIGHTWEIGHT CACHE
-# =====================================================
-SEARCH_CACHE: Dict[str, Tuple[Any, float]] = {}
-CACHE_TTL = 30  # seconds
-MAX_CACHE_SIZE = 1000
-
-def cache_get(key: str) -> Optional[Any]:
-    """Get cached value if not expired"""
-    v = SEARCH_CACHE.get(key)
-    if not v:
-        return None
-    
-    data, ts = v
-    if time.time() - ts > CACHE_TTL:
-        SEARCH_CACHE.pop(key, None)
-        return None
-    
-    return data
-
-def cache_set(key: str, value: Any) -> None:
-    """Set cache value with size limit"""
-    # Clean old entries if cache is too large
-    if len(SEARCH_CACHE) >= MAX_CACHE_SIZE:
-        oldest = min(SEARCH_CACHE.items(), key=lambda x: x[1][1])
-        SEARCH_CACHE.pop(oldest[0], None)
-    
-    SEARCH_CACHE[key] = (value, time.time())
-
-def cache_clear() -> None:
-    """Clear entire cache"""
-    SEARCH_CACHE.clear()
-
-# =====================================================
-# 🧠 QUALITY DETECTOR
-# =====================================================
-QUALITY_PATTERNS = [
-    (re.compile(r'\b(2160p?|4k|uhd)\b', re.IGNORECASE), "2160p"),
-    (re.compile(r'\b1440p?\b', re.IGNORECASE), "1440p"),
-    (re.compile(r'\b1080p?\b', re.IGNORECASE), "1080p"),
-    (re.compile(r'\b720p?\b', re.IGNORECASE), "720p"),
-    (re.compile(r'\b480p?\b', re.IGNORECASE), "480p"),
-    (re.compile(r'\b360p?\b', re.IGNORECASE), "360p"),
-]
-
-def detect_quality(name: str, caption: str = "") -> str:
-    """Detect video quality from filename or caption"""
-    if not name:
-        name = ""
-    
-    # Check both name and caption
-    combined = f"{name} {caption}".lower()
-    
-    for pattern, quality in QUALITY_PATTERNS:
-        if pattern.search(combined):
-            return quality
-    
-    return "unknown"
-
-# =====================================================
-# 🔎 SMART SEARCH ENGINE
-# =====================================================
-async def get_search_results(
-    query: str,
-    offset: int = 0,
-    max_results: int = MAX_BTN
-) -> Tuple[List[Dict], str, int]:
-    """
-    Search files with text search + regex fallback
-    Returns: (files, next_offset, total_count)
-    """
-    # Validate input
-    q = query.strip()
-    if len(q) < 2:
-        return [], "", 0
-    
-    q_lower = q.lower()
-    
-    # Check cache
-    cache_key = f"{q_lower}:{offset}"
-    cached = cache_get(cache_key)
-    if cached:
-        return cached
-
-    files = []
-    total = 0
-
-    # ===============================================
-    # METHOD 1: TEXT SEARCH (FAST & RELEVANT)
-    # ===============================================
-    text_filter = {"$text": {"$search": q}}
-
-    try:
-        cursor = collection.find(
-            text_filter,
-            {
-                "file_name": 1,
-                "file_size": 1,
-                "caption": 1,
-                "quality": 1,
-                "score": {"$meta": "textScore"},
-            }
-        ).sort([("score", {"$meta": "textScore"})]).skip(offset).limit(max_results)
-
-        files = list(cursor)
+                result = await save_file(media)
+                
+                if result == "suc":
+                    indexed += 1
+                elif result == "dup":
+                    duplicates += 1
+                else:
+                    errors += 1
+                
+                # Update status every 50 files
+                total_processed = indexed + duplicates + errors
+                if total_processed > last_update + 50:
+                    last_update = total_processed
+                    try:
+                        await status.edit(
+                            f"⚡ **Indexing in Progress...**\n\n"
+                            f"📢 {channel_title}\n\n"
+                            f"✅ **New:** `{indexed}`\n"
+                            f"⏭ **Duplicate:** `{duplicates}`\n"
+                            f"❌ **Errors:** `{errors}`\n"
+                            f"📊 **Total:** `{total_processed}`"
+                        )
+                    except (MessageNotModified, Exception):
+                        pass
+            
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                continue
+            
+            except Exception as e:
+                errors += 1
+                continue
         
-        if files:
-            # Count with limit for performance
-            total = collection.count_documents(text_filter, limit=10000)
-
+        # Final status
+        total = indexed + duplicates
+        await status.edit(
+            f"✅ **Indexing Complete!**\n\n"
+            f"📢 **Channel:** `{channel_title}`\n"
+            f"🆔 **ID:** `{channel_id}`\n\n"
+            f"✅ **New Files:** `{indexed}`\n"
+            f"⏭ **Duplicates:** `{duplicates}`\n"
+            f"❌ **Errors:** `{errors}`\n"
+            f"⏩ **Skipped:** `{skipped}`\n\n"
+            f"🎉 **Total Indexed:** `{total}`"
+        )
+    
     except Exception as e:
-        logger.error(f"Text search error: {e}")
+        await status.edit(
+            f"❌ **Indexing Failed!**\n\n"
+            f"**Error:** `{str(e)[:200]}`\n\n"
+            f"**Stats:**\n"
+            f"✅ New: `{indexed}`\n"
+            f"⏭ Duplicates: `{duplicates}`\n"
+            f"❌ Errors: `{errors}`"
+        )
 
-    # ===============================================
-    # METHOD 2: REGEX FALLBACK (SLOWER BUT ACCURATE)
-    # ===============================================
-    if not files:
+# =====================================================
+# QUICK INDEX (BATCH FORWARD)
+# =====================================================
+@Client.on_message(filters.private & filters.media & filters.forwarded)
+async def quick_index(bot: Client, message: Message):
+    """Quick index for batch forwarded files"""
+    uid = message.from_user.id
+    
+    # Admin only
+    if uid not in ADMINS:
+        return
+    
+    # Must be from channel
+    if not message.forward_from_chat:
+        return
+    
+    # Get media
+    media = message.document or message.video or message.audio
+    if not media:
+        return
+    
+    # Save and react
+    try:
+        result = await save_file(media)
+        
+        if result == "suc":
+            await message.react("✅")
+        elif result == "dup":
+            await message.react("⏭")
+        else:
+            await message.react("❌")
+    
+    except Exception:
         try:
-            # Escape special regex characters
-            escaped_query = re.escape(q)
-            regex = re.compile(escaped_query, re.IGNORECASE)
-            
-            # Build filter based on caption setting
-            if USE_CAPTION_FILTER:
-                rg_filter = {"$or": [{"file_name": regex}, {"caption": regex}]}
-            else:
-                rg_filter = {"file_name": regex}
-
-            cursor = collection.find(
-                rg_filter,
-                {"file_name": 1, "file_size": 1, "caption": 1, "quality": 1}
-            ).skip(offset).limit(max_results)
-            
-            files = list(cursor)
-            
-            if files:
-                # Limit count for performance
-                total = min(
-                    collection.count_documents(rg_filter, limit=5000),
-                    5000
-                )
-        
-        except Exception as e:
-            logger.error(f"Regex search error: {e}")
-
-    # Calculate next offset
-    next_offset = str(offset + max_results) if total > offset + max_results else ""
-    
-    result = (files, next_offset, total)
-    cache_set(cache_key, result)
-    
-    return result
+            await message.react("❌")
+        except:
+            pass
 
 # =====================================================
-# 🗑 DELETE FILES
+# AUTO INDEX (BOT AS CHANNEL ADMIN)
 # =====================================================
-async def delete_files(query: str) -> int:
-    """Delete files matching query"""
-    if not query or len(query) < 2:
-        return 0
+@Client.on_message(filters.channel & (filters.document | filters.video | filters.audio))
+async def auto_index_channel(bot: Client, message: Message):
+    """Auto-index when bot is channel admin"""
+    
+    media = message.document or message.video or message.audio
+    if not media:
+        return
     
     try:
-        escaped_query = re.escape(query.strip())
-        regex = re.compile(escaped_query, re.IGNORECASE)
-        
-        res = collection.delete_many({"file_name": regex})
-        
-        # Clear cache after deletion
-        cache_clear()
-        
-        return res.deleted_count
+        await save_file(media)
+    except Exception:
+        pass
+
+# =====================================================
+# INDEX STATUS COMMAND
+# =====================================================
+@Client.on_message(filters.command("indexstat") & filters.private)
+async def index_status(bot: Client, message: Message):
+    """Check if indexing is active"""
+    uid = message.from_user.id
     
-    except Exception as e:
-        logger.error(f"Delete error: {e}")
-        return 0
-
-# =====================================================
-# 📄 GET FILE DETAILS
-# =====================================================
-async def get_file_details(file_id: str) -> Optional[Dict]:
-    """Get single file details by ID"""
-    if not file_id:
-        return None
+    if uid not in ADMINS:
+        return
     
-    try:
-        return collection.find_one({"_id": file_id})
-    except Exception as e:
-        logger.error(f"Get file error: {e}")
-        return None
-
-# =====================================================
-# 🧹 TEXT CLEANER
-# =====================================================
-def clean_text(text: str) -> str:
-    """Remove special characters and extra spaces"""
-    if not text:
-        return ""
-    
-    # Remove usernames, URLs, special chars
-    cleaned = re.sub(r'@\w+', '', text)
-    cleaned = re.sub(r'https?://\S+', '', cleaned)
-    cleaned = re.sub(r'[_\-\.+]+', ' ', cleaned)
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    
-    return cleaned.strip()
-
-# =====================================================
-# 💾 SAVE / UPDATE FILE
-# =====================================================
-async def save_file(media) -> str:
-    """
-    Save or update file in database
-    Returns: 'suc' (new), 'dup' (updated), 'err' (failed)
-    """
-    try:
-        # Validate input
-        if not media or not hasattr(media, 'file_id'):
-            return "err"
-        
-        # Generate unique file ID
-        file_id = unpack_new_file_id(media.file_id)
-        
-        # Clean and prepare data
-        file_name = clean_text(getattr(media, 'file_name', None) or "Untitled")
-        caption = clean_text(getattr(media, 'caption', None) or "")
-        file_size = getattr(media, 'file_size', 0)
-        
-        # Detect quality from both name and caption
-        quality = detect_quality(file_name, caption)
-
-        # Prepare document
-        doc = {
-            "_id": file_id,
-            "file_name": file_name,
-            "file_size": file_size,
-            "caption": caption,
-            "quality": quality,
-            "updated_at": datetime.utcnow()
-        }
-
-        # Try insert (new file)
-        try:
-            collection.insert_one(doc)
-            return "suc"
-
-        except DuplicateKeyError:
-            # File exists, update caption and quality
-            collection.update_one(
-                {"_id": file_id},
-                {
-                    "$set": {
-                        "caption": caption,
-                        "quality": quality,
-                        "file_size": file_size,
-                        "updated_at": datetime.utcnow()
-                    }
-                }
-            )
-            return "dup"
-
-    except Exception as e:
-        logger.error(f"Save file error: {e}")
-        return "err"
-
-# =====================================================
-# 🔄 UPDATE CAPTION
-# =====================================================
-async def update_file_caption(file_id: str, new_caption: str) -> bool:
-    """Update file caption"""
-    if not file_id or not new_caption:
-        return False
-
-    try:
-        cleaned_caption = clean_text(new_caption)
-        
-        res = collection.update_one(
-            {"_id": file_id},
-            {
-                "$set": {
-                    "caption": cleaned_caption,
-                    "updated_at": datetime.utcnow()
-                }
-            }
+    if uid in INDEXING_STATE:
+        state = INDEXING_STATE[uid]
+        await message.reply(
+            f"⚡ **Indexing Session Active**\n\n"
+            f"**Method:** {state.get('method', 'None')}\n"
+            f"**Active:** {state.get('active', False)}"
         )
-        
-        # Clear cache on update
-        cache_clear()
-        
-        return res.modified_count > 0
-    
-    except Exception as e:
-        logger.error(f"Update caption error: {e}")
-        return False
-
-# =====================================================
-# 🔄 UPDATE QUALITY
-# =====================================================
-async def update_file_quality(file_id: str, new_name: str, new_caption: str = "") -> bool:
-    """Update file quality based on new name and caption"""
-    if not file_id or not new_name:
-        return False
-
-    try:
-        quality = detect_quality(new_name, new_caption)
-
-        res = collection.update_one(
-            {"_id": file_id},
-            {
-                "$set": {
-                    "quality": quality,
-                    "updated_at": datetime.utcnow()
-                }
-            }
-        )
-        
-        return res.modified_count > 0
-    
-    except Exception as e:
-        logger.error(f"Update quality error: {e}")
-        return False
-
-# =====================================================
-# 🔐 FILE ID ENCODING UTILITIES
-# =====================================================
-def encode_file_id(s: bytes) -> str:
-    """Encode file ID to base64 string"""
-    try:
-        r = b""
-        n = 0
-        
-        for i in s + bytes([22]) + bytes([4]):
-            if i == 0:
-                n += 1
-            else:
-                if n:
-                    r += b"\x00" + bytes([n])
-                    n = 0
-                r += bytes([i])
-        
-        return base64.urlsafe_b64encode(r).decode().rstrip("=")
-    
-    except Exception as e:
-        logger.error(f"Encode error: {e}")
-        return ""
-
-def unpack_new_file_id(new_file_id: str) -> str:
-    """Decode and unpack Telegram file ID"""
-    try:
-        decoded = FileId.decode(new_file_id)
-        
-        return encode_file_id(
-            pack(
-                "<iiqq",
-                int(decoded.file_type),
-                decoded.dc_id,
-                decoded.media_id,
-                decoded.access_hash,
-            )
-        )
-    
-    except Exception as e:
-        logger.error(f"Unpack error: {e}")
-        return ""
-
-# =====================================================
-# 🧪 HEALTH CHECK
-# =====================================================
-async def database_health_check() -> Dict[str, Any]:
-    """Check database health and stats"""
-    try:
-        stats = {
-            "status": "healthy",
-            "total_files": db_count_documents(),
-            "cache_size": len(SEARCH_CACHE),
-            "connected": True
-        }
-        
-        # Test query
-        collection.find_one({})
-        
-        return stats
-    
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "connected": False
-        }
+    else:
+        await message.reply("✅ No active indexing session")
