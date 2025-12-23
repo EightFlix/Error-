@@ -75,25 +75,34 @@ async def index_callback(bot: Client, query):
     
     if data == "cancel":
         INDEXING_STATE.pop(uid, None)
-        await query.message.edit("❌ Indexing cancelled.")
+        try:
+            await query.message.edit("❌ Indexing cancelled.")
+        except MessageNotModified:
+            pass
         return await query.answer()
     
     if data == "link":
         INDEXING_STATE[uid] = {"active": True, "method": "link"}
-        await query.message.edit(
-            "📎 **Send Channel Post Link**\n\n"
-            "**Example:**\n"
-            "`https://t.me/c/1234567890/123`\n\n"
-            "⏱ **Timeout:** 60 seconds"
-        )
+        try:
+            await query.message.edit(
+                "📎 **Send Channel Post Link**\n\n"
+                "**Example:**\n"
+                "`https://t.me/c/1234567890/123`\n\n"
+                "⏱ **Timeout:** 60 seconds"
+            )
+        except MessageNotModified:
+            pass
     
     elif data == "forward":
         INDEXING_STATE[uid] = {"active": True, "method": "forward"}
-        await query.message.edit(
-            "📨 **Forward Message**\n\n"
-            "Forward any message from the channel you want to index\n\n"
-            "⏱ **Timeout:** 60 seconds"
-        )
+        try:
+            await query.message.edit(
+                "📨 **Forward Message**\n\n"
+                "Forward any message from the channel you want to index\n\n"
+                "⏱ **Timeout:** 60 seconds"
+            )
+        except MessageNotModified:
+            pass
     
     await query.answer()
     asyncio.create_task(auto_timeout(uid))
