@@ -1,5 +1,4 @@
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError
 from datetime import datetime
 import time
 import asyncio
@@ -46,6 +45,9 @@ def run_sync(func):
 
 class Database:
 
+    # =========================
+    # DEFAULT STRUCTURES
+    # =========================
     default_settings = {
         "pm_search": True,
         "group_search": True,
@@ -64,9 +66,9 @@ class Database:
         "premium": False,
         "plan": "free",
         "expire": None,
-        "invoice": [],
+        "invoices": [],
         "last_reminder": None,
-        "last_msg_id": None,
+        "activated_at": None,
     }
 
     default_warn = {
@@ -75,7 +77,7 @@ class Database:
     }
 
     # =========================
-    # 🧠 INIT
+    # INIT
     # =========================
     def __init__(self):
         if dbase is None:
@@ -97,18 +99,16 @@ class Database:
             self.bans.create_index("id")
             self.bans.create_index("until")
             self.warns.create_index([("user_id", 1), ("chat_id", 1)])
-            self.premium.create_index("id")
+            self.premium.create_index("id", unique=True)
             self.reminders.create_index([("sent", 1), ("remind_at", 1)])
         except:
             pass
 
     # =========================
-    # 👤 USERS
+    # USERS
     # =========================
     async def is_user_exist(self, user_id: int):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
+        return await asyncio.to_thread(
             lambda: self.users.find_one({"id": user_id}) is not None
         )
 
@@ -116,144 +116,128 @@ class Database:
         if await self.is_user_exist(user_id):
             return False
 
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self.users.insert_one({
+        await asyncio.to_thread(
+            self.users.insert_one,
+            {
                 "id": user_id,
                 "name": name,
                 "created_at": time.time(),
                 "verify": self.default_verify.copy()
-            })
+            }
         )
         return True
 
     async def total_users_count(self):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            self.users.count_documents,
-            {}
-        )
+        return await asyncio.to_thread(self.users.count_documents, {})
 
     async def get_all_users(self):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: list(self.users.find({}))
-        )
+        return await asyncio.to_thread(lambda: list(self.users.find({})))
 
     # =========================
-    # 🚫 BANS
+    # BANS
     # =========================
     async def get_banned_users(self):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
+        return await asyncio.to_thread(
             lambda: list(self.bans.find({"until": {"$gt": time.time()}}))
         )
 
     async def ban_user(self, user_id: int, until: float, reason: str = ""):
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self.bans.update_one(
-                {"id": user_id},
-                {"$set": {
-                    "until": until,
-                    "reason": reason,
-                    "banned_at": time.time()
-                }},
-                upsert=True
-            )
+        await asyncio.to_thread(
+            self.bans.update_one,
+            {"id": user_id},
+            {"$set": {
+                "until": until,
+                "reason": reason,
+                "banned_at": time.time()
+            }},
+            upsert=True
         )
         return True
 
     async def unban_user(self, user_id: int):
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self.bans.delete_one({"id": user_id})
-        )
+        await asyncio.to_thread(self.bans.delete_one, {"id": user_id})
         return True
 
-    # =========================
-    # ✅ FIX: BAN STATUS (MISSING METHOD)
-    # =========================
     async def get_ban_status(self, user_id: int):
-        """
-        Used by plugins/banned.py
-        """
-        try:
-            loop = asyncio.get_event_loop()
-            ban = await loop.run_in_executor(
-                None,
-                lambda: self.bans.find_one({"id": user_id})
-            )
-
-            if not ban:
-                return {"status": False}
-
-            # Auto-unban if expired
-            if ban.get("until", 0) <= time.time():
-                await self.unban_user(user_id)
-                return {"status": False}
-
-            return {
-                "status": True,
-                "reason": ban.get("reason", ""),
-                "until": ban.get("until")
-            }
-
-        except Exception as e:
-            print(f"[BAN_STATUS_ERROR] {e}")
+        ban = await asyncio.to_thread(self.bans.find_one, {"id": user_id})
+        if not ban:
             return {"status": False}
 
+        if ban.get("until", 0) <= time.time():
+            await self.unban_user(user_id)
+            return {"status": False}
+
+        return {
+            "status": True,
+            "reason": ban.get("reason", ""),
+            "until": ban.get("until")
+        }
+
     # =========================
-    # 👥 GROUPS
+    # GROUPS
     # =========================
     async def add_group(self, chat_id: int, title: str):
-        loop = asyncio.get_event_loop()
-        if await loop.run_in_executor(None, lambda: self.groups.find_one({"id": chat_id})):
+        exists = await asyncio.to_thread(self.groups.find_one, {"id": chat_id})
+        if exists:
             return False
 
-        await loop.run_in_executor(
-            None,
-            lambda: self.groups.insert_one({
+        await asyncio.to_thread(
+            self.groups.insert_one,
+            {
                 "id": chat_id,
                 "title": title,
                 "settings": self.default_settings.copy(),
                 "joined_at": time.time()
-            })
+            }
         )
         return True
 
     async def get_settings(self, chat_id: int):
-        loop = asyncio.get_event_loop()
-        group = await loop.run_in_executor(
-            None,
-            lambda: self.groups.find_one({"id": chat_id})
-        )
-
+        group = await asyncio.to_thread(self.groups.find_one, {"id": chat_id})
         settings = self.default_settings.copy()
         if group and "settings" in group:
             settings.update(group["settings"])
         return settings
 
     async def update_settings(self, chat_id: int, settings: dict):
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self.groups.update_one(
-                {"id": chat_id},
-                {"$set": {"settings": settings}},
-                upsert=True
-            )
+        await asyncio.to_thread(
+            self.groups.update_one,
+            {"id": chat_id},
+            {"$set": {"settings": settings}},
+            upsert=True
         )
         return True
 
+    # =========================
+    # 💎 PREMIUM (🔥 FIXED)
+    # =========================
+    async def get_plan(self, user_id: int):
+        data = await asyncio.to_thread(
+            self.premium.find_one,
+            {"id": user_id}
+        )
+
+        if not data:
+            return self.default_plan.copy()
+
+        return data.get("plan", self.default_plan.copy())
+
+    async def update_plan(self, user_id: int, plan_data: dict):
+        await asyncio.to_thread(
+            self.premium.update_one,
+            {"id": user_id},
+            {"$set": {"plan": plan_data}},
+            upsert=True
+        )
+        return True
+
+    async def get_premium_users(self):
+        return await asyncio.to_thread(
+            lambda: list(self.premium.find({"plan.premium": True}))
+        )
+
 
 # =========================
-# ✅ EXPORT
+# EXPORT
 # =========================
 db = Database()
