@@ -1,353 +1,312 @@
 import asyncio
 from datetime import datetime
+from pymongo import MongoClient
+
 from hydrogram import Client, filters
-from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
+from hydrogram.types import (
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery
+)
 from hydrogram.errors import FloodWait, MessageNotModified
 
-from info import ADMINS
+from info import ADMINS, DATA_DATABASE_URL, DATABASE_NAME
 from database.ia_filterdb import save_file
 
 # =====================================================
-# STATE TRACKING
+# GLOBAL STATE
 # =====================================================
 INDEXING_STATE = {}
-CANCEL_INDEX = {}  # 🛑 To track cancellation requests
+CANCEL_INDEX = {}
 
 # =====================================================
-# MANUAL INDEX COMMAND
+# MONGODB (RESUME SUPPORT)
+# =====================================================
+mongo = MongoClient(DATA_DATABASE_URL)
+db = mongo[DATABASE_NAME]
+index_state = db["index_state"]
+
+def get_last_id(channel_id: int):
+    d = index_state.find_one({"_id": channel_id})
+    return d["last_id"] if d else None
+
+def set_last_id(channel_id: int, msg_id: int):
+    index_state.update_one(
+        {"_id": channel_id},
+        {"$set": {"last_id": msg_id}},
+        upsert=True
+    )
+
+# =====================================================
+# MULTI-CHANNEL PARALLEL LIMIT
+# =====================================================
+CHANNEL_SEMAPHORE = asyncio.Semaphore(3)  # change as per server
+
+# =====================================================
+# /index COMMAND
 # =====================================================
 @Client.on_message(filters.command("index") & filters.private)
-async def index_command(bot: Client, message: Message):
-    """Manual indexing command - /index"""
-    uid = message.from_user.id
-    
-    # Admin check
-    if uid not in ADMINS:
-        return await message.reply("❌ This is an admin-only command!")
-    
-    # Show options
-    buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ Channel Post Link", callback_data="idx#link")],
-        [InlineKeyboardButton("2️⃣ Forward Message", callback_data="idx#forward")],
+async def index_cmd(bot: Client, msg: Message):
+    if msg.from_user.id not in ADMINS:
+        return await msg.reply("❌ Admin only")
+
+    btn = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📎 Channel Link / Post Link", callback_data="idx#link")],
+        [InlineKeyboardButton("📨 Forward Message", callback_data="idx#forward")],
         [InlineKeyboardButton("❌ Cancel", callback_data="idx#cancel")]
     ])
-    
-    await message.reply(
-        "📑 **Manual Indexing**\n\n"
-        "**Send me one of the following:**\n"
-        "1️⃣ Channel post link (https://t.me/c/...)\n"
-        "2️⃣ Forward any message from the channel\n\n"
-        "⏱ **Timeout:** 60 seconds",
-        reply_markup=buttons
+
+    await msg.reply(
+        "🔥 **Manual Indexing**\n\n"
+        "• Channel link\n"
+        "• Channel post link (`/c/xxxx/123`)\n"
+        "• Forwarded message\n\n"
+        "⏱ Timeout: 60 sec",
+        reply_markup=btn
     )
-    
-    # Set state
-    INDEXING_STATE[uid] = {
+
+    INDEXING_STATE[msg.from_user.id] = {
         "active": True,
         "method": None,
-        "timestamp": datetime.utcnow()
+        "time": datetime.utcnow()
     }
-    
-    # Auto timeout after 60 seconds
-    asyncio.create_task(auto_timeout(uid))
+
+    asyncio.create_task(auto_timeout(msg.from_user.id))
 
 # =====================================================
 # AUTO TIMEOUT
 # =====================================================
-async def auto_timeout(uid: int):
-    """Auto-remove state after timeout"""
+async def auto_timeout(uid):
     await asyncio.sleep(60)
-    if uid in INDEXING_STATE:
-        INDEXING_STATE.pop(uid, None)
+    INDEXING_STATE.pop(uid, None)
 
 # =====================================================
-# CALLBACK HANDLER (SETUP & STOP)
+# CALLBACK HANDLER
 # =====================================================
 @Client.on_callback_query(filters.regex("^idx#"))
-async def index_callback(bot: Client, query: CallbackQuery):
-    """Handle indexing option callbacks"""
-    uid = query.from_user.id
-    
+async def idx_callback(bot: Client, q: CallbackQuery):
+    uid = q.from_user.id
     if uid not in ADMINS:
-        return await query.answer("❌ Admin only!", show_alert=True)
-    
-    data = query.data.split("#")[1]
-    
+        return await q.answer("Admin only", show_alert=True)
+
+    data = q.data.split("#")[1]
+
     if data == "cancel":
         INDEXING_STATE.pop(uid, None)
-        try:
-            await query.message.edit("❌ Indexing cancelled.")
-        except MessageNotModified:
-            pass
-        return await query.answer()
-    
-    if data == "link":
-        INDEXING_STATE[uid] = {"active": True, "method": "link"}
-        try:
-            await query.message.edit(
-                "📎 **Send Channel Post Link**\n\n"
-                "**Example:**\n"
-                "`https://t.me/c/1234567890/123`\n\n"
-                "⏱ **Timeout:** 60 seconds"
-            )
-        except MessageNotModified:
-            pass
-    
-    elif data == "forward":
-        INDEXING_STATE[uid] = {"active": True, "method": "forward"}
-        try:
-            await query.message.edit(
-                "📨 **Forward Message**\n\n"
-                "Forward any message from the channel you want to index\n\n"
-                "⏱ **Timeout:** 60 seconds"
-            )
-        except MessageNotModified:
-            pass
-    
-    await query.answer()
-    asyncio.create_task(auto_timeout(uid))
+        return await q.message.edit("❌ Cancelled")
 
-# 🛑 NEW: Callback to STOP indexing
-@Client.on_callback_query(filters.regex("^stopidx#"))
-async def stop_indexing_callback(bot: Client, query: CallbackQuery):
-    uid = query.from_user.id
-    
-    if uid not in ADMINS:
-        return await query.answer("❌ Admin only!", show_alert=True)
-        
-    _, channel_id = query.data.split("#")
-    
-    # Set global cancel flag for this channel
-    CANCEL_INDEX[int(channel_id)] = True
-    
-    await query.answer("🛑 Stopping Indexing...", show_alert=True)
-    try:
-        await query.message.edit_text("🛑 **Stopping process... Please wait.**")
-    except:
-        pass
+    INDEXING_STATE[uid]["method"] = data
+    text = "Send channel link or post link" if data == "link" else "Forward channel message"
+    await q.message.edit(f"📥 **{text}**")
+
+    await q.answer()
 
 # =====================================================
-# PROCESS FORWARDED MESSAGE
-# =====================================================
-@Client.on_message(filters.private & filters.forwarded)
-async def process_forwarded(bot: Client, message: Message):
-    """Handle forwarded messages for indexing"""
-    uid = message.from_user.id
-    
-    if uid not in ADMINS:
-        return
-    
-    state = INDEXING_STATE.get(uid)
-    if not state or not state.get("active"):
-        return
-    
-    if not message.forward_from_chat:
-        return await message.reply("❌ Message must be forwarded from a channel!")
-    
-    channel = message.forward_from_chat
-    channel_id = channel.id
-    channel_title = channel.title or "Unknown Channel"
-    
-    try:
-        chat = await bot.get_chat(channel_id)
-        if not chat:
-            return await message.reply("❌ Bot doesn't have access to this channel!")
-    except Exception as e:
-        return await message.reply(f"❌ Cannot access channel:\n`{str(e)[:150]}`")
-    
-    INDEXING_STATE.pop(uid, None)
-    
-    # Reset Cancel Flag
-    CANCEL_INDEX[channel_id] = False
-    
-    status = await message.reply(
-        f"⚡ **Starting Indexing**\n\n"
-        f"📢 **Channel:** `{channel_title}`\n"
-        f"🆔 **ID:** `{channel_id}`\n\n"
-        f"⏳ Please wait, this may take a while..."
-    )
-    
-    await run_channel_indexing(bot, status, channel_id, channel_title)
-
-# =====================================================
-# PROCESS CHANNEL LINK
+# LINK HANDLER
 # =====================================================
 @Client.on_message(filters.private & filters.text)
-async def process_link(bot: Client, message: Message):
-    """Handle channel links for indexing"""
-    uid = message.from_user.id
-    
-    if uid not in ADMINS:
+async def handle_link(bot: Client, msg: Message):
+    uid = msg.from_user.id
+    st = INDEXING_STATE.get(uid)
+
+    if not st or st.get("method") != "link":
         return
-    
-    state = INDEXING_STATE.get(uid)
-    if not state or not state.get("active") or state.get("method") != "link":
-        return
-    
-    if "t.me/" not in message.text:
-        return await message.reply("❌ Please send a valid Telegram link!")
-    
-    text = message.text.strip()
-    channel_id = None
-    
+
+    text = msg.text.strip()
+    start_from = None
+
     try:
         if "/c/" in text:
-            parts = text.split("/c/")[1].split("/")
-            raw_id = parts[0]
-            channel_id = int("-100" + raw_id)
-        elif "t.me/" in text:
-            username = text.split("t.me/")[1].split("/")[0].replace("@", "")
+            raw = text.split("/c/")[1].split("/")
+            channel_id = int("-100" + raw[0])
+            if len(raw) > 1:
+                start_from = int(raw[1])
+        else:
+            username = text.split("t.me/")[1].split("/")[0]
             chat = await bot.get_chat(username)
             channel_id = chat.id
-        else:
-            return await message.reply("❌ Invalid link format!")
-    
-    except Exception as e:
-        return await message.reply(f"❌ Error: `{str(e)[:100]}`")
-    
-    try:
+
         chat = await bot.get_chat(channel_id)
-        channel_title = chat.title or "Unknown Channel"
+        title = chat.title or "Unknown"
+
     except Exception as e:
-        return await message.reply(f"❌ Cannot access channel:\n`{str(e)[:150]}`")
-    
+        return await msg.reply(f"❌ `{e}`")
+
     INDEXING_STATE.pop(uid, None)
-    
-    # Reset Cancel Flag
     CANCEL_INDEX[channel_id] = False
-    
-    status = await message.reply(
-        f"⚡ **Starting Indexing**\n\n"
-        f"📢 **Channel:** `{channel_title}`\n"
-        f"🆔 **ID:** `{channel_id}`\n\n"
-        f"⏳ Please wait, this may take a while..."
+
+    status = await msg.reply(f"⚡ Starting index\n📢 `{title}`")
+
+    asyncio.create_task(
+        run_parallel_index(
+            bot,
+            status,
+            channel_id,
+            title,
+            start_from
+        )
     )
-    
-    await run_channel_indexing(bot, status, channel_id, channel_title)
 
 # =====================================================
-# MAIN INDEXING LOGIC (UPDATED WITH FIX & STOP)
+# FORWARD HANDLER
 # =====================================================
-async def run_channel_indexing(bot: Client, status: Message, channel_id: int, channel_title: str):
-    """Index all media files from channel"""
-    
-    indexed = 0
-    duplicates = 0
-    errors = 0
-    skipped = 0
-    last_update = 0
-    
-    # 🛑 STOP BUTTON MARKUP
-    stop_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop Indexing", callback_data=f"stopidx#{channel_id}")]])
-    
+@Client.on_message(filters.private & filters.forwarded)
+async def handle_forward(bot: Client, msg: Message):
+    uid = msg.from_user.id
+    st = INDEXING_STATE.get(uid)
+
+    if not st or st.get("method") != "forward":
+        return
+
+    if not msg.forward_from_chat:
+        return await msg.reply("❌ Forward from channel only")
+
+    channel = msg.forward_from_chat
+    INDEXING_STATE.pop(uid, None)
+    CANCEL_INDEX[channel.id] = False
+
+    status = await msg.reply(f"⚡ Starting index\n📢 `{channel.title}`")
+
+    asyncio.create_task(
+        run_parallel_index(
+            bot,
+            status,
+            channel.id,
+            channel.title,
+            None
+        )
+    )
+
+# =====================================================
+# PARALLEL CHANNEL RUNNER
+# =====================================================
+async def run_parallel_index(bot, status, channel_id, title, start_from):
+    async with CHANNEL_SEMAPHORE:
+        await channel_indexer(bot, status, channel_id, title, start_from)
+
+# =====================================================
+# MAIN INDEXER
+# =====================================================
+async def channel_indexer(bot, status, channel_id, title, start_from):
+    indexed = dup = err = skip = 0
+    buffer = []
+    batch_size = 20
+    last_saved = None
+
+    if start_from is None:
+        start_from = get_last_id(channel_id)
+
+    stop_btn = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛑 Stop", callback_data=f"stopidx#{channel_id}")]
+    ])
+
     try:
-        # ✅ FIX: Using get_chat_history instead of iter_chat_history
-        async for msg in bot.get_chat_history(channel_id):
-            
-            # 🛑 CHECK CANCELLATION
+        async for msg in bot.get_chat_history(
+            channel_id,
+            offset_id=start_from - 1 if start_from else 0
+        ):
             if CANCEL_INDEX.get(channel_id):
-                await status.edit(
-                    f"🛑 **Indexing Cancelled by Admin!**\n\n"
-                    f"📢 **Channel:** `{channel_title}`\n"
-                    f"📊 **Final Stats:**\n"
-                    f"✅ New: `{indexed}` | ⏭ Dups: `{duplicates}`"
-                )
-                return  # Exit function completely
+                break
 
-            # Skip non-media messages
             if not msg.media:
-                skipped += 1
+                skip += 1
                 continue
-            
+
             media = msg.document or msg.video or msg.audio
             if not media:
-                skipped += 1
+                skip += 1
                 continue
-            
-            try:
-                result = await save_file(media)
-                
-                if result == "suc":
+
+            buffer.append((media, msg.id))
+
+            if len(buffer) >= batch_size:
+                res = await process_batch(buffer)
+                buffer.clear()
+
+                for r, mid in res:
+                    if r == "suc":
+                        indexed += 1
+                        last_saved = mid
+                    elif r == "dup":
+                        dup += 1
+                    else:
+                        err += 1
+
+                if last_saved:
+                    set_last_id(channel_id, last_saved)
+
+                await safe_edit(status, title, indexed, dup, err, skip, stop_btn)
+
+        if buffer:
+            res = await process_batch(buffer)
+            for r, mid in res:
+                if r == "suc":
                     indexed += 1
-                elif result == "dup":
-                    duplicates += 1
+                    last_saved = mid
+                elif r == "dup":
+                    dup += 1
                 else:
-                    errors += 1
-                
-                # Update status every 50 files
-                total_processed = indexed + duplicates + errors
-                if total_processed > last_update + 50:
-                    last_update = total_processed
-                    try:
-                        await status.edit(
-                            f"⚡ **Indexing in Progress...**\n\n"
-                            f"📢 {channel_title}\n\n"
-                            f"✅ **New:** `{indexed}`\n"
-                            f"⏭ **Duplicate:** `{duplicates}`\n"
-                            f"❌ **Errors:** `{errors}`\n"
-                            f"📊 **Total:** `{total_processed}`",
-                            reply_markup=stop_btn  # 🛑 Added Stop Button
-                        )
-                        await asyncio.sleep(1)
-                    except (MessageNotModified, Exception):
-                        pass
-            
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                continue
-            
-            except Exception:
-                errors += 1
-                continue
-        
-        # Final status (Completed)
-        total = indexed + duplicates
+                    err += 1
+
+            if last_saved:
+                set_last_id(channel_id, last_saved)
+
+        if CANCEL_INDEX.get(channel_id):
+            return await status.edit(
+                f"🛑 Stopped\n📢 `{title}`\n"
+                f"✅ {indexed} ⏭ {dup} ❌ {err}"
+            )
+
         await status.edit(
-            f"✅ **Indexing Complete!**\n\n"
-            f"📢 **Channel:** `{channel_title}`\n"
-            f"🆔 **ID:** `{channel_id}`\n\n"
-            f"✅ **New Files:** `{indexed}`\n"
-            f"⏭ **Duplicates:** `{duplicates}`\n"
-            f"❌ **Errors:** `{errors}`\n"
-            f"⏩ **Skipped:** `{skipped}`\n\n"
-            f"🎉 **Total Indexed:** `{total}`"
-        )
-    
-    except Exception as e:
-        await status.edit(
-            f"❌ **Indexing Failed!**\n\n"
-            f"**Error:** `{str(e)[:200]}`\n\n"
-            f"**Stats:**\n"
-            f"✅ New: `{indexed}`\n"
-            f"⏭ Duplicates: `{duplicates}`\n"
-            f"❌ Errors: `{errors}`"
+            f"✅ Completed\n\n"
+            f"📢 `{title}`\n"
+            f"✅ {indexed}\n"
+            f"⏭ {dup}\n"
+            f"❌ {err}\n"
+            f"⏩ {skip}"
         )
 
+    except Exception as e:
+        await status.edit(f"❌ Failed:\n`{str(e)[:200]}`")
+
 # =====================================================
-# QUICK INDEX & AUTO INDEX (UNCHANGED)
+# BATCH PROCESSING
 # =====================================================
-@Client.on_message(filters.private & filters.media & filters.forwarded)
-async def quick_index(bot: Client, message: Message):
-    uid = message.from_user.id
-    if uid not in ADMINS or not message.forward_from_chat:
-        return
-    
-    media = message.document or message.video or message.audio
-    if not media:
-        return
-    
+async def process_batch(batch):
+    tasks = [save_wrap(m, i) for m, i in batch]
+    return await asyncio.gather(*tasks)
+
+async def save_wrap(media, mid):
     try:
-        result = await save_file(media)
-        if result == "suc": await message.react("✅")
-        elif result == "dup": await message.react("⏭")
-        else: await message.react("❌")
+        r = await save_file(media)
+        return r, mid
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        return "err", mid
     except:
+        return "err", mid
+
+# =====================================================
+# SAFE EDIT
+# =====================================================
+async def safe_edit(msg, title, i, d, e, s, btn):
+    try:
+        await msg.edit(
+            f"⚡ `{title}`\n"
+            f"✅ {i} ⏭ {d} ❌ {e} ⏩ {s}",
+            reply_markup=btn
+        )
+    except MessageNotModified:
         pass
 
-@Client.on_message(filters.channel & (filters.document | filters.video | filters.audio))
-async def auto_index_channel(bot: Client, message: Message):
-    media = message.document or message.video or message.audio
-    if not media: return
-    try: await save_file(media)
-    except: pass
-
+# =====================================================
+# STOP CALLBACK
+# =====================================================
+@Client.on_callback_query(filters.regex("^stopidx#"))
+async def stop_idx(bot: Client, q: CallbackQuery):
+    if q.from_user.id not in ADMINS:
+        return
+    cid = int(q.data.split("#")[1])
+    CANCEL_INDEX[cid] = True
+    await q.answer("Stopping...", show_alert=True)
