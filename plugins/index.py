@@ -120,11 +120,6 @@ async def process_forwarded(bot: Client, message: Message):
         return await message.reply("❌ Message must be forwarded from a channel!")
     
     channel = message.forward_from_chat
-    
-    # Only channels allowed
-    if channel.type not in ["channel", "supergroup"]:
-        return await message.reply("❌ Must be from a channel or supergroup!")
-    
     channel_id = channel.id
     channel_title = channel.title or "Unknown Channel"
     
@@ -151,7 +146,7 @@ async def process_forwarded(bot: Client, message: Message):
 # =====================================================
 # PROCESS CHANNEL LINK
 # =====================================================
-@Client.on_message(filters.private & filters.text & filters.regex(r"https://t\.me/"))
+@Client.on_message(filters.private & filters.text)
 async def process_link(bot: Client, message: Message):
     """Handle channel links for indexing"""
     uid = message.from_user.id
@@ -165,21 +160,36 @@ async def process_link(bot: Client, message: Message):
     if not state or not state.get("active") or state.get("method") != "link":
         return
     
+    # Must contain t.me link
+    if "t.me/" not in message.text:
+        return await message.reply("❌ Please send a valid Telegram link!")
+    
     text = message.text.strip()
+    channel_id = None
     
     # Extract channel ID from link
     try:
         if "/c/" in text:
-            # Private channel: https://t.me/c/1234567890/123
+            # Private channel: https://t.me/c/1540608679/1484
             parts = text.split("/c/")[1].split("/")
-            channel_id = int("-100" + parts[0])
-        else:
-            # Public channel: https://t.me/channelname/123
-            username = text.split("t.me/")[1].split("/")[0]
+            raw_id = parts[0]
+            channel_id = int("-100" + raw_id)
+        elif "t.me/" in text:
+            # Public channel: https://t.me/channelname or @channelname
+            username = text.split("t.me/")[1].split("/")[0].replace("@", "")
             chat = await bot.get_chat(username)
             channel_id = chat.id
+        else:
+            return await message.reply("❌ Invalid link format!")
+    
     except Exception as e:
-        return await message.reply(f"❌ Invalid link format:\n`{str(e)[:150]}`")
+        return await message.reply(
+            f"❌ **Cannot parse link**\n\n"
+            f"Error: `{str(e)[:100]}`\n\n"
+            f"**Format:**\n"
+            f"• Private: `https://t.me/c/1234567890/123`\n"
+            f"• Public: `https://t.me/channelname`"
+        )
     
     # Verify access
     try:
