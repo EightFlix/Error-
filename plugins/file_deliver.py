@@ -9,20 +9,12 @@ from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Callback
 from info import IS_STREAM, PM_FILE_DELETE_TIME, PROTECT_CONTENT, ADMINS
 from database.ia_filterdb import get_file_details
 from database.users_chats_db import db
-from utils import get_settings, get_size, get_shortlink, temp
-
-
-# ======================================================
-# LOGGING
-# ======================================================
-
-logger = logging.getLogger(__name__)
+from utils import get_settings, get_size, get_shortlink, temp, is_premium
 
 
 # ======================================================
 # CONFIG
 # ======================================================
-
 GRACE_PERIOD = timedelta(minutes=30)
 RESEND_EXPIRE_TIME = 60  # seconds
 
@@ -31,10 +23,10 @@ active_tasks = {}
 
 
 # ======================================================
-# PREMIUM CHECK
+# PREMIUM CHECK WITH GRACE PERIOD
 # ======================================================
-
 async def has_premium_or_grace(user_id: int) -> bool:
+    """Check if user is admin or has premium with grace period"""
     if user_id in ADMINS:
         return True
 
@@ -50,88 +42,141 @@ async def has_premium_or_grace(user_id: int) -> bool:
 
 
 # ======================================================
-# FILE BUTTON (GROUP)
+# FILE BUTTON HANDLER (GROUP)
 # ======================================================
-
 @Client.on_callback_query(filters.regex(r"^file#"))
 async def file_button_handler(client: Client, query: CallbackQuery):
+    """Handle file button clicks in groups"""
     _, file_id = query.data.split("#", 1)
 
+    # Get file details
     file = await get_file_details(file_id)
     if not file:
         return await query.answer("❌ File not found", show_alert=True)
 
-    settings = await get_settings(query.message.chat.id)
     uid = query.from_user.id
-
-    # ---- FREE USER → SHORTLINK ----
-    if settings.get("shortlink") and not await has_premium_or_grace(uid):
-        link = await get_shortlink(
-            settings.get("url"),
-            settings.get("api"),
-            f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}"
+    group_id = query.message.chat.id
+    
+    # Get group settings
+    settings = await get_settings(group_id)
+    
+    # ========================================
+    # PREMIUM CHECK (Bot Admin or Premium User)
+    # ========================================
+    is_user_premium = await has_premium_or_grace(uid)
+    
+    # Premium users (Bot Admin + Premium) get direct PM link
+    if is_user_premium:
+        await query.answer(
+            url=f"https://t.me/{temp.U_NAME}?start=file_{group_id}_{file_id}"
         )
-        return await query.message.reply_text(
-            f"<b>📁 {file['file_name']}</b>\n"
-            f"📦 <b>Size:</b> {get_size(file['file_size'])}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚀 Get File", url=link)],
-                [InlineKeyboardButton("❌ Close", callback_data="close_data")]
-            ])
-        )
-
-    # ---- PREMIUM → PM ----
+        return
+    
+    # ========================================
+    # NON-PREMIUM: SHORTLINK (Even if Group Admin)
+    # ========================================
+    # Check if shortlink is enabled for this group
+    if settings.get("shortlink"):
+        shortlink_url = settings.get("url")
+        shortlink_api = settings.get("api")
+        
+        if shortlink_url and shortlink_api:
+            # Generate shortlink
+            link = await get_shortlink(
+                shortlink_url,
+                shortlink_api,
+                f"https://t.me/{temp.U_NAME}?start=file_{group_id}_{file_id}"
+            )
+            
+            # Send shortlink button
+            return await query.message.reply_text(
+                f"<b>📁 {file['file_name']}</b>\n"
+                f"📦 <b>Size:</b> {get_size(file['file_size'])}\n\n"
+                f"🔒 <b>Click the button below to get the file</b>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 Get File", url=link)],
+                    [InlineKeyboardButton("❌ Close", callback_data="close_data")]
+                ])
+            )
+    
+    # If no shortlink configured, send direct PM link
     await query.answer(
-        url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}"
+        url=f"https://t.me/{temp.U_NAME}?start=file_{group_id}_{file_id}"
     )
 
 
 # ======================================================
-# /START FILE DELIVERY (PM)
+# START FILE DELIVERY (PM)
 # ======================================================
-
 @Client.on_message(
     filters.private &
     filters.command("start") &
-    filters.regex(r"file_")
+    filters.regex(r"file_"),
+    group=1  # Higher priority
 )
 async def start_file_delivery(client: Client, message):
+    """Handle /start file_ commands in PM"""
     try:
+        # Parse file command
         _, grp_id, file_id = message.text.split("_", 2)
         grp_id = int(grp_id)
-    except Exception as e:
+    except Exception:
         return
 
-    # Cancel previous file task for this user (optional - limits to 1 file at a time)
-    user_task_key = f"user_{message.from_user.id}"
+    uid = message.from_user.id
+    
+    # ========================================
+    # PREMIUM CHECK (Bot Admin or Premium)
+    # ========================================
+    is_user_premium = await has_premium_or_grace(uid)
+    
+    if not is_user_premium:
+        # Non-premium user tried to access file directly
+        # This should only happen if they bypassed shortlink
+        await message.reply_text(
+            "🔒 <b>Premium Required</b>\n\n"
+            "Direct file access is only available for premium users.\n"
+            "Please use the shortlink button in the group."
+        )
+        # Delete /start command
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # ========================================
+    # DELIVER FILE TO PREMIUM USER
+    # ========================================
+    # Cancel previous file task for this user
+    user_task_key = f"user_{uid}"
     if user_task_key in active_tasks:
         active_tasks[user_task_key].cancel()
 
-    # Create new task and track it
+    # Create new delivery task
     task = asyncio.create_task(
-        deliver_file(client, message.from_user.id, grp_id, file_id)
+        deliver_file(client, uid, grp_id, file_id)
     )
     active_tasks[user_task_key] = task
 
-    # Clean up task reference when done
+    # Cleanup callback
     def cleanup_task(t):
         active_tasks.pop(user_task_key, None)
     
     task.add_done_callback(cleanup_task)
 
-    # 🔥 ALWAYS DELETE /start
+    # Delete /start command
     try:
         await message.delete()
-    except Exception as e:
+    except:
         pass
 
 
 # ======================================================
-# AUTO DELETE TASK (SEPARATE FROM DELIVERY)
+# SCHEDULE FILE DELETION
 # ======================================================
-
 async def schedule_file_deletion(client, sent_msg, uid, file_id):
-    """Separate task for file deletion"""
+    """Schedule auto-deletion of file message"""
     msg_id = sent_msg.id
     
     # Track in temp storage
@@ -153,7 +198,7 @@ async def schedule_file_deletion(client, sent_msg, uid, file_id):
         # Delete the file message
         try:
             await sent_msg.delete()
-        except Exception as e:
+        except:
             pass
         
         # Send resend button
@@ -168,37 +213,43 @@ async def schedule_file_deletion(client, sent_msg, uid, file_id):
             ])
         )
         
-        # Auto-delete resend button after timeout
+        # Auto-delete resend button
         await asyncio.sleep(RESEND_EXPIRE_TIME)
         try:
             await resend.delete()
-        except Exception as e:
+        except:
             pass
             
     except asyncio.CancelledError:
-        # Task was cancelled, clean up
+        # Task cancelled, cleanup
         temp.FILES.pop(msg_id, None)
         raise
 
 
 # ======================================================
-# CORE DELIVERY (NON-BLOCKING)
+# CORE FILE DELIVERY
 # ======================================================
-
 async def deliver_file(client, uid, grp_id, file_id):
+    """Deliver file to premium user in PM"""
     try:
+        # Get file details
         file = await get_file_details(file_id)
         if not file:
             return
 
-        settings = await get_settings(grp_id)
-
-        if settings.get("shortlink") and not await has_premium_or_grace(uid):
+        # Verify premium status again (security check)
+        if not await has_premium_or_grace(uid):
+            await client.send_message(
+                uid,
+                "🔒 <b>Premium Required</b>\n\n"
+                "This file is only accessible to premium users."
+            )
             return
 
-        # ==================================================
-        # CLEAN CAPTION (NO DUPLICATE EVER)
-        # ==================================================
+        # Get group settings (for additional checks)
+        settings = await get_settings(grp_id) if grp_id else {}
+
+        # Build caption
         file_name = (file.get("file_name") or "").strip()
         file_caption = (file.get("caption") or "").strip()
 
@@ -207,9 +258,7 @@ async def deliver_file(client, uid, grp_id, file_id):
         else:
             caption = f"{file_name}\n\n{file_caption}"
 
-        # ==================================================
-        # BUTTONS
-        # ==================================================
+        # Build buttons
         buttons = []
         if IS_STREAM:
             buttons.append([
@@ -218,10 +267,13 @@ async def deliver_file(client, uid, grp_id, file_id):
                     callback_data=f"stream#{file_id}"
                 )
             ])
-        buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_data")])
+        buttons.append([
+            InlineKeyboardButton("❌ Close", callback_data="close_data")
+        ])
 
         markup = InlineKeyboardMarkup(buttons)
 
+        # Send file
         sent = await client.send_cached_media(
             chat_id=uid,
             file_id=file_id,
@@ -230,9 +282,7 @@ async def deliver_file(client, uid, grp_id, file_id):
             reply_markup=markup
         )
 
-        # ==================================================
-        # SCHEDULE DELETION (NON-BLOCKING)
-        # ==================================================
+        # Schedule deletion
         deletion_task = asyncio.create_task(
             schedule_file_deletion(client, sent, uid, file_id)
         )
@@ -241,30 +291,39 @@ async def deliver_file(client, uid, grp_id, file_id):
         task_key = f"delete_{sent.id}"
         active_tasks[task_key] = deletion_task
         
-        # Cleanup when done
+        # Cleanup callback
         def cleanup_deletion(t):
             active_tasks.pop(task_key, None)
         
         deletion_task.add_done_callback(cleanup_deletion)
         
-    except Exception as e:
+    except Exception:
         pass
 
 
 # ======================================================
 # RESEND HANDLER
 # ======================================================
-
 @Client.on_callback_query(filters.regex(r"^resend#"))
 async def resend_handler(client, query: CallbackQuery):
+    """Handle resend file button"""
     file_id = query.data.split("#", 1)[1]
     uid = query.from_user.id
 
+    # Verify premium status
+    if not await has_premium_or_grace(uid):
+        return await query.answer(
+            "🔒 Premium required to resend files",
+            show_alert=True
+        )
+
     await query.answer()
+    
+    # Delete resend message
     try:
         await query.message.delete()
     except:
         pass
 
-    # Use the same delivery mechanism
+    # Resend file
     asyncio.create_task(deliver_file(client, uid, 0, file_id))
