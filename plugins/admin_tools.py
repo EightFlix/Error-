@@ -2,12 +2,12 @@ import os
 import sys
 import time
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 from hydrogram import Client, filters
 from hydrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
-from hydrogram.errors import MessageNotModified, MessageIdInvalid, BadRequest
+from hydrogram.errors import MessageNotModified, MessageIdInvalid, BadRequest, ListenerTimeout
 
 from info import ADMINS, LOG_CHANNEL
 from database.users_chats_db import db
@@ -16,22 +16,17 @@ from utils import get_size, get_readable_time, temp
 
 
 # ======================================================
-# 🧠 LIVE DASHBOARD CONFIG
+# 🧠 CONFIG & SAFE INIT
 # ======================================================
 
 DASH_REFRESH = 45
 DASH_CACHE = {}
 DASH_LOCKS = defaultdict(asyncio.Lock)
 
-# Index stats safe init
+# Safe init
 if not hasattr(temp, "INDEX_STATS"):
-    temp.INDEX_STATS = {
-        "running": False,
-        "start": 0,
-        "saved": 0
-    }
+    temp.INDEX_STATS = {"running": False, "start": 0, "saved": 0}
 
-# Bot start time (fallback)
 if not hasattr(temp, "START_TIME"):
     temp.START_TIME = time.time()
 
@@ -46,20 +41,8 @@ async def safe_edit(msg, text, **kwargs):
             return True
         await msg.edit(text, **kwargs)
         return True
-    except MessageNotModified:
-        return True
-    except (MessageIdInvalid, BadRequest):
+    except (MessageNotModified, MessageIdInvalid, BadRequest):
         return False
-    except Exception:
-        return False
-
-
-async def safe_send_log(bot, text):
-    if not LOG_CHANNEL:
-        return False
-    try:
-        await bot.send_message(LOG_CHANNEL, text)
-        return True
     except Exception:
         return False
 
@@ -71,8 +54,15 @@ async def safe_answer(query, text="", alert=False):
         pass
 
 
+def fmt(dt):
+    """Format datetime"""
+    if isinstance(dt, (int, float)):
+        dt = datetime.utcfromtimestamp(dt)
+    return dt.strftime("%d %b %Y, %I:%M %p")
+
+
 # ======================================================
-# 📊 DASHBOARD BUILDER (FIXED)
+# 📊 DASHBOARD BUILDER
 # ======================================================
 
 async def build_dashboard():
@@ -86,27 +76,21 @@ async def build_dashboard():
         "now": datetime.fromtimestamp(time.time()).strftime("%d %b %Y, %I:%M %p")
     }
 
-    # Users
     try:
         stats["users"] = await db.total_users_count()
     except:
         pass
 
-    # Groups
     try:
-        stats["chats"] = await asyncio.to_thread(
-            db.groups.count_documents, {}
-        )
+        stats["chats"] = await asyncio.to_thread(db.groups.count_documents, {})
     except:
         pass
 
-    # Files
     try:
         stats["files"] = await asyncio.to_thread(db_count_documents)
     except:
         pass
 
-    # Premium
     try:
         stats["premium"] = await asyncio.to_thread(
             db.premium.count_documents, {"plan.premium": True}
@@ -114,20 +98,17 @@ async def build_dashboard():
     except:
         pass
 
-    # ✅ DB SIZE FIX (REAL FIX)
     try:
         info = await asyncio.to_thread(db.users.database.command, "dbstats")
         stats["used_data"] = get_size(info.get("dataSize", 0))
     except:
-        stats["used_data"] = "0 B"
+        pass
 
-    # Uptime
     try:
         stats["uptime"] = get_readable_time(time.time() - temp.START_TIME)
     except:
         pass
 
-    # Index speed
     idx_text = "❌ Not running"
     try:
         idx = temp.INDEX_STATS
@@ -139,7 +120,7 @@ async def build_dashboard():
         pass
 
     return (
-        "📊 <b>LIVE ADMIN DASHBOARD</b>\n\n"
+        "📊 <b>ADMIN CONTROL PANEL</b>\n\n"
         f"👤 <b>Users</b>        : <code>{stats['users']}</code>\n"
         f"👥 <b>Groups</b>       : <code>{stats['chats']}</code>\n"
         f"📦 <b>Indexed Files</b>: <code>{stats['files']}</code>\n"
@@ -152,78 +133,295 @@ async def build_dashboard():
 
 
 # ======================================================
-# 🎛 BUTTONS
+# 🎛 MAIN ADMIN PANEL BUTTONS
 # ======================================================
 
-def dashboard_buttons():
+def admin_panel_buttons():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔄 Refresh", callback_data="dash_refresh"),
-            InlineKeyboardButton("🗑 Delete", callback_data="dash_delete")
+            InlineKeyboardButton("💎 Premium", callback_data="admin_premium"),
+            InlineKeyboardButton("🗑 Delete Files", callback_data="admin_delete")
         ],
         [
-            InlineKeyboardButton("🔄 Restart", callback_data="dash_restart"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="admin_refresh"),
+            InlineKeyboardButton("🔄 Restart Bot", callback_data="admin_restart")
+        ],
+        [
             InlineKeyboardButton("❌ Close", callback_data="close_data")
         ]
     ])
 
 
+def premium_panel_buttons():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("➕ Add", callback_data="prm_add"),
+            InlineKeyboardButton("➖ Remove", callback_data="prm_remove"),
+            InlineKeyboardButton("⏳ Extend", callback_data="prm_extend")
+        ],
+        [
+            InlineKeyboardButton("🔍 Check User", callback_data="prm_check")
+        ],
+        [
+            InlineKeyboardButton("⏰ Expiring 3d", callback_data="prm_exp_3"),
+            InlineKeyboardButton("⏰ 7d", callback_data="prm_exp_7"),
+            InlineKeyboardButton("⏰ 30d", callback_data="prm_exp_30")
+        ],
+        [
+            InlineKeyboardButton("📊 Expiry Chart", callback_data="prm_chart")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data="admin_back")
+        ]
+    ])
+
+
 # ======================================================
-# 🚀 OPEN DASHBOARD
+# 🚀 /admin COMMAND - UNIFIED PANEL
 # ======================================================
 
 @Client.on_message(filters.command(["admin", "dashboard"]) & filters.user(ADMINS))
-async def open_dashboard(bot, message):
-    msg = await message.reply("⏳ Loading dashboard...")
+async def open_admin_panel(bot, message):
+    msg = await message.reply("⏳ Loading admin panel...")
     text = await build_dashboard()
-    await safe_edit(msg, text, reply_markup=dashboard_buttons())
+    await safe_edit(msg, text, reply_markup=admin_panel_buttons())
 
 
 # ======================================================
-# 🔁 CALLBACKS
+# 🔁 MAIN ADMIN CALLBACKS
 # ======================================================
 
-@Client.on_callback_query(filters.regex("^dash_"))
-async def dash_callbacks(bot, query: CallbackQuery):
-
+@Client.on_callback_query(filters.regex("^admin_"))
+async def admin_callbacks(bot, query: CallbackQuery):
     if query.from_user.id not in ADMINS:
-        return await safe_answer(query, "Not allowed", True)
+        return await safe_answer(query, "Admins only", True)
 
     action = query.data
 
-    if action == "dash_refresh":
+    # Dashboard refresh
+    if action == "admin_refresh":
         async with DASH_LOCKS[query.from_user.id]:
             text = await build_dashboard()
-            await safe_edit(query.message, text, reply_markup=dashboard_buttons())
-            await safe_answer(query, "Updated")
+            await safe_edit(query.message, text, reply_markup=admin_panel_buttons())
+            await safe_answer(query, "✅ Updated")
 
-    elif action == "dash_delete":
+    # Premium panel
+    elif action == "admin_premium":
+        total = db.premium.count_documents({"plan.premium": True})
+        await safe_edit(
+            query.message,
+            (
+                "💎 <b>Premium Management Panel</b>\n\n"
+                f"👤 Active Premium : <code>{total}</code>\n"
+                f"🕒 Time : <code>{fmt(datetime.utcnow())}</code>"
+            ),
+            reply_markup=premium_panel_buttons()
+        )
+        await safe_answer(query)
+
+    # Delete files
+    elif action == "admin_delete":
         await safe_edit(
             query.message,
             "🗑 <b>Delete Files</b>\n\n"
-            "Use:\n<code>/delete keyword</code>",
+            "Use command:\n<code>/delete keyword</code>\n\n"
+            "This will delete all files matching the keyword.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Back", callback_data="dash_refresh")]]
+                [[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]
             )
         )
+        await safe_answer(query)
 
-    elif action == "dash_restart":
-        await safe_answer(query, "Restarting...", True)
+    # Restart bot
+    elif action == "admin_restart":
+        await safe_answer(query, "🔄 Restarting bot...", True)
+        await safe_edit(query.message, "⏳ Restarting...")
         try:
             os.execl(sys.executable, sys.executable, "bot.py")
-        except:
-            await safe_edit(query.message, "❌ Restart failed")
+        except Exception as e:
+            await safe_edit(query.message, f"❌ Restart failed: {e}")
+
+    # Back to main panel
+    elif action == "admin_back":
+        text = await build_dashboard()
+        await safe_edit(query.message, text, reply_markup=admin_panel_buttons())
+        await safe_answer(query)
 
 
 # ======================================================
-# 🗑 DELETE FILES
+# 💎 PREMIUM CALLBACKS
+# ======================================================
+
+@Client.on_callback_query(filters.regex("^prm_"))
+async def premium_callbacks(bot, query: CallbackQuery):
+    if query.from_user.id not in ADMINS:
+        return await safe_answer(query, "Admins only", True)
+
+    action = query.data
+    now = datetime.utcnow()
+
+    await safe_answer(query)
+
+    # Expiring soon (3/7/30 days)
+    if action.startswith("prm_exp_"):
+        days = int(action.split("_")[-1])
+        limit = now + timedelta(days=days)
+
+        users = db.get_premium_users()
+        result = []
+
+        for u in users:
+            uid = u.get("id")
+            if uid in ADMINS:
+                continue
+
+            plan = u.get("plan", {})
+            expire = plan.get("expire")
+            if not expire:
+                continue
+
+            if isinstance(expire, (int, float)):
+                expire = datetime.utcfromtimestamp(expire)
+
+            if now <= expire <= limit:
+                left = int((expire - now).total_seconds())
+                result.append(f"👤 <code>{uid}</code> → ⏳ {get_readable_time(left)}")
+
+            if len(result) >= 20:
+                break
+
+        if not result:
+            await safe_edit(
+                query.message,
+                f"✅ No premium users expiring in next {days} days.\n\n"
+                "Use /premium to return to panel.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔙 Back", callback_data="admin_premium")]]
+                )
+            )
+        else:
+            await safe_edit(
+                query.message,
+                f"⏰ <b>Premium Expiring in {days} Days</b>\n\n" + "\n".join(result),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔙 Back", callback_data="admin_premium")]]
+                )
+            )
+
+    # Expiry chart
+    elif action == "prm_chart":
+        users = db.get_premium_users()
+        c_3 = c_7 = c_30 = c_30p = 0
+
+        for u in users:
+            uid = u.get("id")
+            if uid in ADMINS:
+                continue
+
+            plan = u.get("plan", {})
+            expire = plan.get("expire")
+            if not expire:
+                continue
+
+            if isinstance(expire, (int, float)):
+                expire = datetime.utcfromtimestamp(expire)
+
+            days_left = (expire - now).days
+
+            if days_left <= 3:
+                c_3 += 1
+            elif days_left <= 7:
+                c_7 += 1
+            elif days_left <= 30:
+                c_30 += 1
+            else:
+                c_30p += 1
+
+        await safe_edit(
+            query.message,
+            "📊 <b>Premium Expiry Chart</b>\n\n"
+            f"🟥 0–3 days   : <code>{c_3}</code>\n"
+            f"🟧 4–7 days   : <code>{c_7}</code>\n"
+            f"🟨 8–30 days  : <code>{c_30}</code>\n"
+            f"🟩 30+ days   : <code>{c_30p}</code>",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Back", callback_data="admin_premium")]]
+            )
+        )
+
+    # Check user
+    elif action == "prm_check":
+        await safe_edit(
+            query.message,
+            "🔍 <b>Check Premium Status</b>\n\n"
+            "Reply with user ID to check their premium status.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Back", callback_data="admin_premium")]]
+            )
+        )
+
+    # Add premium (placeholder)
+    elif action == "prm_add":
+        await safe_edit(
+            query.message,
+            "➕ <b>Add Premium</b>\n\n"
+            "Use command:\n<code>/addpremium user_id days</code>\n\n"
+            "Example: <code>/addpremium 123456789 30</code>",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Back", callback_data="admin_premium")]]
+            )
+        )
+
+    # Remove premium (placeholder)
+    elif action == "prm_remove":
+        await safe_edit(
+            query.message,
+            "➖ <b>Remove Premium</b>\n\n"
+            "Use command:\n<code>/removepremium user_id</code>\n\n"
+            "Example: <code>/removepremium 123456789</code>",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Back", callback_data="admin_premium")]]
+            )
+        )
+
+    # Extend premium (placeholder)
+    elif action == "prm_extend":
+        await safe_edit(
+            query.message,
+            "⏳ <b>Extend Premium</b>\n\n"
+            "Use command:\n<code>/extendpremium user_id days</code>\n\n"
+            "Example: <code>/extendpremium 123456789 15</code>",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Back", callback_data="admin_premium")]]
+            )
+        )
+
+
+# ======================================================
+# 🗑 DELETE FILES COMMAND
 # ======================================================
 
 @Client.on_message(filters.command("delete") & filters.user(ADMINS))
 async def delete_cmd(_, message):
     if len(message.command) < 2:
-        return await message.reply("Usage: /delete keyword")
+        return await message.reply(
+            "❌ <b>Usage:</b> <code>/delete keyword</code>\n\n"
+            "This will delete all files matching the keyword."
+        )
 
     key = message.text.split(" ", 1)[1].strip()
+    msg = await message.reply(f"⏳ Deleting files for `{key}`...")
+    
     count = await asyncio.to_thread(delete_files, key)
-    await message.reply(f"✅ Deleted {count} files for `{key}`")
+    
+    await msg.edit(f"✅ Successfully deleted <code>{count}</code> files matching `{key}`")
+
+
+# ======================================================
+# 🔐 CLOSE CALLBACK
+# ======================================================
+
+@Client.on_callback_query(filters.regex("^close_data$"))
+async def close_callback(_, query: CallbackQuery):
+    await query.message.delete()
+    await safe_answer(query, "✅ Closed")
