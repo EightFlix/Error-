@@ -119,7 +119,7 @@ def update_message_activity(message_id):
 
 
 # =====================================================
-# 📩 MESSAGE HANDLER
+# 📩 MESSAGE HANDLER (✅ FIXED)
 # =====================================================
 @Client.on_message(filters.text & filters.incoming & (filters.group | filters.private))
 async def filter_handler(client, message):
@@ -136,24 +136,27 @@ async def filter_handler(client, message):
             return
 
         # ==============================
-        # 🛡️ RATE LIMIT CHECK (Skip for Admins & Premium)
+        # ✅ PREMIUM CHECK (ONE TIME ONLY)
         # ==============================
+        user_is_premium = False
         if user_id not in ADMINS:
-            # Check if user is premium
             try:
                 user_is_premium = await is_premium(user_id, client)
-            except:
+            except Exception as e:
+                print(f"Premium check error: {e}")
                 user_is_premium = False
-            
-            # Apply rate limit only for non-premium users
-            if not user_is_premium:
-                if is_rate_limited(user_id):
-                    text = (
-                        "⚠️ <b>Too many searches!</b>\n\n"
-                        "Please wait a moment before searching again.\n\n"
-                        "💡 <b>Tip:</b> Premium users get unlimited searches!"
-                    )
-                    return await message.reply_text(text, quote=True)
+
+        # ==============================
+        # 🛡️ RATE LIMIT (Non-Premium only)
+        # ==============================
+        if user_id not in ADMINS and not user_is_premium:
+            if is_rate_limited(user_id):
+                text = (
+                    "⚠️ <b>Too many searches!</b>\n\n"
+                    "Please wait a moment before searching again.\n\n"
+                    "💡 <b>Tip:</b> Premium users get unlimited searches!"
+                )
+                return await message.reply_text(text, quote=True)
 
         # 🔥 auto-learn keywords (RAM only, ultra fast)
         try:
@@ -174,31 +177,30 @@ async def filter_handler(client, message):
             is_pm = False
 
         # ==============================
-        # 📩 PM SEARCH (PREMIUM + ADMIN ONLY)
+        # 📩 PM SEARCH (✅ FIXED - PREMIUM + ADMIN)
         # ==============================
         else:
             chat_id = user_id
             source_chat_id = 0
             is_pm = True
 
-            # ✅ Admin and Premium only
-            if user_id not in ADMINS:
-                if not await is_premium(user_id, client):
-                    text = (
-                        "🔒 <b>Premium Required</b>\n\n"
-                        "This feature is for premium users only.\n"
-                        "Upgrade now to unlock unlimited search."
-                    )
+            # ✅ Block only non-premium & non-admin
+            if user_id not in ADMINS and not user_is_premium:
+                text = (
+                    "🔒 <b>Premium Required</b>\n\n"
+                    "This feature is for premium users only.\n"
+                    "Upgrade now to unlock unlimited search."
+                )
 
-                    btn = InlineKeyboardMarkup(
-                        [[
-                            InlineKeyboardButton(
-                                "💳 Renew via UPI",
-                                url=f"upi://pay?pa={UPI_ID}&pn={UPI_NAME}&cu=INR"
-                            )
-                        ]]
-                    )
-                    return await client.send_message(chat_id, text, reply_markup=btn)
+                btn = InlineKeyboardMarkup(
+                    [[
+                        InlineKeyboardButton(
+                            "💳 Renew via UPI",
+                            url=f"upi://pay?pa={UPI_ID}&pn={UPI_NAME}&cu=INR"
+                        )
+                    ]]
+                )
+                return await client.send_message(chat_id, text, reply_markup=btn)
 
         # 🧹 Sanitize and normalize search
         search = sanitize_search(raw_search)
