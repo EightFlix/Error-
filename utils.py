@@ -31,20 +31,15 @@ except ImportError:
 class temp(object):
     START_TIME = 0
     BOT = None
-
     ME = None
     U_NAME = None
     B_NAME = None
 
     SETTINGS = {}
     VERIFICATIONS = {}
-
     FILES = {}          # msg_id -> delivery data
     PREMIUM = {}        # RAM premium cache
     KEYWORDS = {}       # learned keywords (RAM)
-
-    LANG_USER = {}      # user_id -> hi/en
-    LANG_GROUP = {}     # group_id -> hi/en
 
     INDEX_STATS = {
         "running": False,
@@ -57,7 +52,6 @@ class temp(object):
     
     # Koyeb optimization flags
     _cleanup_running = False
-    _watcher_running = False
     _reminder_running = False
 
 
@@ -66,7 +60,7 @@ class temp(object):
 # ======================================================
 
 GRACE_PERIOD = timedelta(minutes=20)
-PREMIUM_CACHE_TTL = 600  # 10 min cache (increased for Koyeb)
+PREMIUM_CACHE_TTL = 600  # 10 min cache
 
 
 # ======================================================
@@ -74,97 +68,62 @@ PREMIUM_CACHE_TTL = 600  # 10 min cache (increased for Koyeb)
 # ======================================================
 
 async def is_premium(user_id, bot=None) -> bool:
-    """Koyeb optimized premium check with extended cache"""
-    if not IS_PREMIUM or user_id in ADMINS:
+    """
+    Koyeb optimized premium check with extended cache
+    Returns True if user is premium, False otherwise
+    """
+    # Admins always have premium
+    if user_id in ADMINS:
+        return True
+    
+    # If premium system is disabled, everyone has access
+    if not IS_PREMIUM:
         return True
 
     now_ts = time.time()
     cached = temp.PREMIUM.get(user_id)
 
+    # Check cache first (10 min TTL)
     if cached and now_ts - cached["checked_at"] < PREMIUM_CACHE_TTL:
         expire = cached["expire"]
-        return bool(expire and datetime.utcnow() <= expire + GRACE_PERIOD)
-
-    try:
-        plan = db.get_plan(user_id)
-    except Exception as e:
-        print(f"[KOYEB] DB error in is_premium: {e}")
+        if expire:
+            return datetime.utcnow() <= expire + GRACE_PERIOD
         return False
 
+    # Fetch from database
+    try:
+        plan = await db.get_plan(user_id)
+    except Exception as e:
+        print(f"[ERROR] is_premium DB error for user {user_id}: {e}")
+        # On error, return cached value if exists
+        if cached:
+            expire = cached["expire"]
+            return bool(expire and datetime.utcnow() <= expire + GRACE_PERIOD)
+        return False
+
+    # No plan or not premium
     if not plan or not plan.get("premium"):
         temp.PREMIUM[user_id] = {"expire": None, "checked_at": now_ts}
         return False
 
+    # Get expiry date
     expire = plan.get("expire")
     if isinstance(expire, (int, float)):
         expire = datetime.utcfromtimestamp(expire)
-
-    if datetime.utcnow() > expire + GRACE_PERIOD:
-        try:
-            plan.update({
-                "premium": False,
-                "expire": "",
-                "plan": "",
-                "last_reminder": "expired"
-            })
-            db.update_plan(user_id, plan)
-        except Exception as e:
-            print(f"[KOYEB] DB error updating expired plan: {e}")
-        
+    elif not isinstance(expire, datetime):
         temp.PREMIUM[user_id] = {"expire": None, "checked_at": now_ts}
         return False
 
+    # Check if expired (with grace period)
+    now_utc = datetime.utcnow()
+    if now_utc > expire + GRACE_PERIOD:
+        # Don't auto-remove here - let background task handle it
+        temp.PREMIUM[user_id] = {"expire": None, "checked_at": now_ts}
+        return False
+
+    # Cache and return
     temp.PREMIUM[user_id] = {"expire": expire, "checked_at": now_ts}
     return True
-
-
-# ======================================================
-# 🛡 PREMIUM WATCHER (Koyeb Optimized)
-# ======================================================
-
-async def check_premium(bot):
-    """Koyeb optimized premium watcher with error handling"""
-    if temp._watcher_running:
-        return
-    
-    temp._watcher_running = True
-    
-    while True:
-        try:
-            now = datetime.utcnow()
-            users = db.get_premium_users()
-            
-            for u in users:
-                try:
-                    uid = u["id"]
-                    if uid in ADMINS:
-                        continue
-
-                    plan = u.get("plan", {})
-                    expire = plan.get("expire")
-                    if not expire:
-                        continue
-
-                    if isinstance(expire, (int, float)):
-                        expire = datetime.utcfromtimestamp(expire)
-
-                    if now > expire + GRACE_PERIOD:
-                        plan.update({"premium": False, "expire": "", "plan": ""})
-                        db.update_plan(uid, plan)
-                        temp.PREMIUM.pop(uid, None)
-                
-                except Exception as e:
-                    print(f"[KOYEB] Error checking user {uid}: {e}")
-                    continue
-                    
-                # Small delay to prevent CPU spike on Koyeb
-                await asyncio.sleep(0.1)
-                
-        except Exception as e:
-            print(f"[KOYEB] Premium watcher error: {e}")
-        
-        # Longer sleep for Koyeb (30 min)
-        await asyncio.sleep(1800)
 
 
 # ======================================================
@@ -172,27 +131,39 @@ async def check_premium(bot):
 # ======================================================
 
 REMINDER_STEPS = [
-    ("1d", timedelta(days=1)),
-    ("6h", timedelta(hours=6)),
-    ("1h", timedelta(hours=1))
+    ("1 day", timedelta(days=1)),
+    ("6 hours", timedelta(hours=6)),
+    ("1 hour", timedelta(hours=1))
 ]
 
 async def premium_expiry_reminder(bot):
-    """Koyeb optimized reminder with batch processing"""
+    """
+    Koyeb optimized reminder with batch processing
+    Sends reminders at: 1 day, 6 hours, 1 hour before expiry
+    """
     if temp._reminder_running:
+        print("[INFO] Reminder task already running, skipping...")
         return
     
     temp._reminder_running = True
+    print("[INFO] ✅ Premium expiry reminder task started")
     
     while True:
         try:
             now = datetime.utcnow()
-            users = db.get_premium_users()
+            users = await db.get_premium_users()
+            
+            if not users:
+                await asyncio.sleep(1800)  # 30 min
+                continue
+            
+            reminder_count = 0
             
             for user in users:
                 try:
-                    uid = user["id"]
-                    if uid in ADMINS:
+                    uid = user.get("_id") or user.get("id")
+                    
+                    if not uid or uid in ADMINS:
                         continue
 
                     plan = user.get("plan", {})
@@ -202,40 +173,56 @@ async def premium_expiry_reminder(bot):
                     if not expire:
                         continue
 
+                    # Convert to datetime
                     if isinstance(expire, (int, float)):
                         expire = datetime.utcfromtimestamp(expire)
+                    elif not isinstance(expire, datetime):
+                        continue
 
+                    # Check each reminder step
                     for tag, delta in REMINDER_STEPS:
+                        # Skip if already sent this reminder
                         if last == tag:
                             continue
+                        
+                        # Check if it's time for this reminder
                         if expire - delta <= now < expire:
                             try:
                                 await bot.send_message(
                                     uid,
                                     "⏰ **Premium Expiry Alert**\n\n"
-                                    f"Your premium will expire in **{tag}**.\n"
-                                    "Renew now to avoid interruption."
+                                    f"Your premium will expire in **{tag}**.\n\n"
+                                    "Use /plan to renew and continue enjoying premium benefits!"
                                 )
+                                
+                                # Update last reminder
                                 plan["last_reminder"] = tag
-                                db.update_plan(uid, plan)
+                                await db.update_plan(uid, plan)
+                                
+                                reminder_count += 1
+                                print(f"[INFO] Sent {tag} reminder to user {uid}")
+                                
                             except FloodWait as e:
+                                print(f"[WARN] FloodWait {e.value}s for user {uid}")
                                 await asyncio.sleep(e.value)
                             except Exception as e:
-                                print(f"[KOYEB] Reminder send error: {e}")
-                            break
+                                print(f"[ERROR] Failed to send reminder to {uid}: {e}")
+                            
+                            break  # Only send one reminder per user per iteration
                     
-                    # Prevent CPU spike
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.2)  # Rate limiting
                     
                 except Exception as e:
-                    print(f"[KOYEB] Error processing reminder for {uid}: {e}")
+                    print(f"[ERROR] Error processing reminder for user: {e}")
                     continue
+            
+            if reminder_count > 0:
+                print(f"[INFO] Sent {reminder_count} premium expiry reminders")
                     
         except Exception as e:
-            print(f"[KOYEB] Reminder error: {e}")
+            print(f"[ERROR] Premium reminder task error: {e}")
         
-        # 30 min sleep
-        await asyncio.sleep(1800)
+        await asyncio.sleep(1800)  # Run every 30 minutes
 
 
 # ======================================================
@@ -249,7 +236,7 @@ async def get_verify_status(user_id: int):
             temp.VERIFICATIONS[user_id] = await db.get_verify_status(user_id)
         return temp.VERIFICATIONS[user_id]
     except Exception as e:
-        print(f"[KOYEB] Verify status error: {e}")
+        print(f"[ERROR] Get verify status error for user {user_id}: {e}")
         return {}
 
 
@@ -261,7 +248,7 @@ async def update_verify_status(user_id: int, **kwargs):
         temp.VERIFICATIONS[user_id] = verify
         await db.update_verify_status(user_id, verify)
     except Exception as e:
-        print(f"[KOYEB] Update verify error: {e}")
+        print(f"[ERROR] Update verify status error for user {user_id}: {e}")
 
 
 # ======================================================
@@ -271,21 +258,21 @@ async def update_verify_status(user_id: int, **kwargs):
 def learn_keywords(text: str):
     """Lightweight keyword learning with memory limit"""
     try:
-        # Limit keywords to prevent memory issues on Koyeb
+        # Prevent memory bloat
         if len(temp.KEYWORDS) > 10000:
-            # Keep only top 5000 most frequent
             sorted_kw = sorted(temp.KEYWORDS.items(), key=lambda x: x[1], reverse=True)
             temp.KEYWORDS = dict(sorted_kw[:5000])
         
+        # Learn keywords from search text
         for w in text.lower().split():
-            if len(w) >= 3 and len(w) <= 50:  # Limit word length
+            if 3 <= len(w) <= 50:
                 temp.KEYWORDS[w] = temp.KEYWORDS.get(w, 0) + 1
     except Exception as e:
-        print(f"[KOYEB] Keyword learn error: {e}")
+        print(f"[ERROR] Keyword learn error: {e}")
 
 
 def fast_similarity(a: str, b: str) -> int:
-    """Fast similarity check"""
+    """Fast similarity check (0-100)"""
     try:
         if a == b:
             return 100
@@ -293,106 +280,58 @@ def fast_similarity(a: str, b: str) -> int:
         common = a_set & b_set
         if not common:
             return 0
-        score = int((len(common) / max(len(a_set), len(b_set))) * 100)
-        return min(score, 100)
+        return min(int((len(common) / max(len(a_set), len(b_set))) * 100), 100)
     except:
         return 0
 
 
 def suggest_query(query: str):
-    """Suggest similar query"""
+    """Suggest similar query based on learned keywords"""
     try:
         best, score = None, 0
         query_lower = query.lower()
         
-        # Limit search iterations on Koyeb
-        checked = 0
-        for k in temp.KEYWORDS:
-            if checked > 500:  # Limit iterations
+        # Check top 500 keywords only
+        for i, k in enumerate(temp.KEYWORDS):
+            if i > 500:
                 break
             s = fast_similarity(query_lower, k)
             if s > score:
                 best, score = k, s
-            checked += 1
             
         return best if score >= 60 else None
     except Exception as e:
-        print(f"[KOYEB] Suggest query error: {e}")
+        print(f"[ERROR] Suggest query error: {e}")
         return None
 
 
 # ======================================================
-# 🌍 LANGUAGE SYSTEM
+# 🎉 GREETING SYSTEM
 # ======================================================
-
-def set_user_lang(user_id, lang):
-    """Set user language"""
-    temp.LANG_USER[user_id] = lang
-
-
-def set_group_lang(group_id, lang):
-    """Set group language"""
-    temp.LANG_GROUP[group_id] = lang
-
-
-def get_lang(user_id=None, group_id=None, default="en"):
-    """Get language preference"""
-    if user_id and user_id in temp.LANG_USER:
-        return temp.LANG_USER[user_id]
-    if group_id and group_id in temp.LANG_GROUP:
-        return temp.LANG_GROUP[group_id]
-    return default
-
-
-# ======================================================
-# 🎉 FESTIVAL + GREETING
-# ======================================================
-
-FESTIVALS = {
-    (3, 25): "holi",
-    (11, 1): "diwali",
-    (4, 10): "eid"
-}
-
-FESTIVAL_MSG = {
-    "holi": {"en": "🎨 Happy Holi", "hi": "🎨 होली मुबारक"},
-    "diwali": {"en": "🪔 Happy Diwali", "hi": "🪔 दीपावली मुबारक"},
-    "eid": {"en": "🌙 Eid Mubarak", "hi": "🌙 ईद मुबारक"}
-}
 
 EMOJI_DAY = ["🌞", "✨", "🌤"]
 EMOJI_NIGHT = ["🌙", "⭐", "😴"]
 
 
-def detect_festival():
-    """Detect current festival"""
+def get_wish(user_name=None, premium=False):
+    """Get greeting message based on time of day"""
     try:
-        now = datetime.now(pytz.timezone(TIME_ZONE))
-        return FESTIVALS.get((now.month, now.day))
-    except:
-        return None
-
-
-def get_wish(user_name=None, lang="en", premium=False):
-    """Get greeting message"""
-    try:
-        fest = detect_festival()
-        if fest:
-            return FESTIVAL_MSG[fest].get(lang, FESTIVAL_MSG[fest]["en"])
-
         hour = datetime.now(pytz.timezone(TIME_ZONE)).hour
         emoji = random.choice(EMOJI_DAY if hour < 18 else EMOJI_NIGHT)
+        
         if premium:
             emoji = "👑 " + emoji
 
         name = f", {user_name}" if user_name else ""
+        
         if hour < 12:
-            return f"{emoji} {'सुप्रभात' if lang=='hi' else 'Good Morning'}{name}"
-        if hour < 18:
-            return f"{emoji} {'नमस्ते' if lang=='hi' else 'Good Afternoon'}{name}"
-        return f"{emoji} {'शुभ रात्रि' if lang=='hi' else 'Good Evening'}{name}"
+            return f"{emoji} Good Morning{name}"
+        elif hour < 18:
+            return f"{emoji} Good Afternoon{name}"
+        else:
+            return f"{emoji} Good Evening{name}"
     except Exception as e:
-        print(f"[KOYEB] Wish error: {e}")
+        print(f"[ERROR] Get wish error: {e}")
         return "Hello!"
 
 
@@ -401,36 +340,45 @@ def get_wish(user_name=None, lang="en", premium=False):
 # ======================================================
 
 async def cleanup_files_memory():
-    """Koyeb optimized memory cleanup"""
+    """
+    Koyeb optimized memory cleanup
+    Removes expired files and old premium cache
+    """
     if temp._cleanup_running:
+        print("[INFO] Cleanup task already running, skipping...")
         return
     
     temp._cleanup_running = True
+    print("[INFO] ✅ File memory cleanup task started")
     
     while True:
         try:
             now = int(time.time())
-            expired_keys = []
             
-            # Collect expired keys
-            for k, v in temp.FILES.items():
-                if v.get("expire", 0) <= now:
-                    expired_keys.append(k)
+            # Cleanup expired files
+            expired = [k for k, v in temp.FILES.items() if v.get("expire", 0) <= now]
+            if expired:
+                for k in expired:
+                    temp.FILES.pop(k, None)
+                print(f"[INFO] Cleaned {len(expired)} expired files from memory")
             
-            # Remove in batch
-            for k in expired_keys:
-                temp.FILES.pop(k, None)
-            
-            # Also cleanup old cache entries
+            # Cleanup old premium cache (keep only 1000 most recent)
             if len(temp.PREMIUM) > 1000:
                 old_keys = list(temp.PREMIUM.keys())[:500]
                 for k in old_keys:
                     temp.PREMIUM.pop(k, None)
+                print(f"[INFO] Cleaned {len(old_keys)} old premium cache entries")
+            
+            # Cleanup keywords if too many
+            if len(temp.KEYWORDS) > 10000:
+                sorted_kw = sorted(temp.KEYWORDS.items(), key=lambda x: x[1], reverse=True)
+                temp.KEYWORDS = dict(sorted_kw[:5000])
+                print(f"[INFO] Cleaned keywords, kept top 5000")
                     
         except Exception as e:
-            print(f"[KOYEB] Cleanup error: {e}")
+            print(f"[ERROR] Cleanup task error: {e}")
         
-        await asyncio.sleep(120)  # 2 min
+        await asyncio.sleep(120)  # Run every 2 minutes
 
 
 # ======================================================
@@ -438,19 +386,22 @@ async def cleanup_files_memory():
 # ======================================================
 
 async def broadcast_messages(user_id, message, pin=False):
-    """Broadcast to user with flood protection"""
+    """Broadcast message to user with flood protection"""
     try:
         msg = await message.copy(chat_id=user_id)
         if pin:
-            await msg.pin(both_sides=True)
+            try:
+                await msg.pin(both_sides=True)
+            except:
+                pass
         return "Success"
     except FloodWait as e:
-        if e.value > 300:  # More than 5 min
+        if e.value > 300:
             return "Error"
         await asyncio.sleep(e.value)
         return await broadcast_messages(user_id, message, pin)
     except Exception as e:
-        print(f"[KOYEB] Broadcast error for {user_id}: {e}")
+        print(f"[ERROR] Broadcast error for user {user_id}: {e}")
         try:
             await db.delete_user(int(user_id))
         except:
@@ -459,11 +410,14 @@ async def broadcast_messages(user_id, message, pin=False):
 
 
 async def groups_broadcast_messages(chat_id, message, pin=False):
-    """Broadcast to group with flood protection"""
+    """Broadcast message to group with flood protection"""
     try:
         msg = await message.copy(chat_id=chat_id)
         if pin:
-            await msg.pin()
+            try:
+                await msg.pin()
+            except:
+                pass
         return "Success"
     except FloodWait as e:
         if e.value > 300:
@@ -471,7 +425,7 @@ async def groups_broadcast_messages(chat_id, message, pin=False):
         await asyncio.sleep(e.value)
         return await groups_broadcast_messages(chat_id, message, pin)
     except Exception as e:
-        print(f"[KOYEB] Group broadcast error for {chat_id}: {e}")
+        print(f"[ERROR] Group broadcast error for {chat_id}: {e}")
         try:
             await db.delete_chat(chat_id)
         except:
@@ -484,17 +438,18 @@ async def groups_broadcast_messages(chat_id, message, pin=False):
 # ======================================================
 
 async def is_subscribed(bot, query):
-    """Check subscription with error handling"""
+    """Check if user is subscribed to required channels"""
     buttons = []
 
     try:
+        # Premium users bypass force sub
         if await is_premium(query.from_user.id, bot):
             return buttons
     except Exception as e:
-        print(f"[KOYEB] Premium check error in is_subscribed: {e}")
+        print(f"[ERROR] Premium check error in is_subscribed: {e}")
 
     try:
-        stg = db.get_bot_sttgs()
+        stg = await db.get_bot_sttgs()
         if not stg or not stg.get("FORCE_SUB_CHANNELS"):
             return buttons
 
@@ -511,10 +466,10 @@ async def is_subscribed(bot, query):
                         [InlineKeyboardButton(f"📢 Join {chat.title}", url=invite)]
                     )
             except Exception as e:
-                print(f"[KOYEB] Force sub check error for {cid}: {e}")
+                print(f"[ERROR] Force sub check error for channel {cid}: {e}")
                 continue
     except Exception as e:
-        print(f"[KOYEB] is_subscribed error: {e}")
+        print(f"[ERROR] is_subscribed error: {e}")
 
     return buttons
 
@@ -537,7 +492,7 @@ async def generate_qr_code(data: str):
         bio.seek(0)
         return bio
     except Exception as e:
-        print(f"[KOYEB] QR generation error: {e}")
+        print(f"[ERROR] QR generation error: {e}")
         return None
 
 
@@ -551,21 +506,20 @@ async def get_shortlink(url, api, link):
         return link
     
     try:
-        # Add timeout for Koyeb
         return await asyncio.wait_for(
             Shortzy(api_key=api, base_site=url).convert(link),
             timeout=10.0
         )
     except asyncio.TimeoutError:
-        print(f"[KOYEB] Shortlink timeout")
+        print(f"[WARN] Shortlink timeout")
         return link
     except Exception as e:
-        print(f"[KOYEB] Shortlink error: {e}")
+        print(f"[ERROR] Shortlink error: {e}")
         return link
 
 
 # ======================================================
-# 🧰 SMALL UTILITIES
+# 🧰 UTILITIES
 # ======================================================
 
 def get_size(size):
@@ -602,5 +556,5 @@ async def get_settings(group_id):
             temp.SETTINGS[group_id] = await db.get_settings(group_id)
         return temp.SETTINGS[group_id]
     except Exception as e:
-        print(f"[KOYEB] Settings error: {e}")
+        print(f"[ERROR] Get settings error for group {group_id}: {e}")
         return {}
