@@ -256,7 +256,7 @@ async def back_to_myplan_cb(client, query: CallbackQuery):
 
 
 # ======================================================
-# 💰 BUY FLOW (FIXED LISTEN ERROR)
+# 💰 BUY FLOW (HYDROGRAM COMPATIBLE - FIXED)
 # ======================================================
 
 @Client.on_callback_query(filters.regex("^buy_premium$"))
@@ -287,8 +287,17 @@ Then you can choose:
     )
     
     try:
-        # FIX: Removed "filters=" and "timeout=" keywords to avoid argument collision
-        msg = await client.listen(query.message.chat.id, filters.user(uid), LISTEN_SHORT)
+        # ✅ FIXED: Hydrogram compatible listen() syntax
+        msg = await client.listen(query.message.chat.id, timeout=LISTEN_SHORT)
+        
+        # ✅ FIXED: Manual user verification
+        if msg.from_user.id != uid:
+            active_sessions.pop(uid, None)
+            await query.message.edit(
+                "❌ Invalid response. Please try again.",
+                reply_markup=buy_btn()
+            )
+            return
         
         if not msg.text:
             active_sessions.pop(uid, None)
@@ -420,14 +429,22 @@ async def duration_selected(client, query: CallbackQuery):
         active_sessions.pop(uid, None)
         return await query.answer(f"❌ Error: {str(e)}", show_alert=True)
     
-    # Wait for screenshot - FIX HERE TOO
+    # ✅ FIXED: Hydrogram compatible listen() for screenshot
     try:
-        # FIX: Removed "filters=" and "timeout=" keywords here too
+        # ✅ FIXED: Correct syntax without filters parameter
         receipt = await client.listen(
             query.message.chat.id, 
-            filters.user(uid) & filters.photo, 
-            LISTEN_LONG
+            timeout=LISTEN_LONG
         )
+        
+        # ✅ FIXED: Manual verification for user and photo
+        if receipt.from_user.id != uid:
+            active_sessions.pop(uid, None)
+            await query.message.reply(
+                "❌ Invalid response. Please try again.",
+                reply_markup=buy_btn()
+            )
+            return
         
         if not receipt.photo:
             active_sessions.pop(uid, None)
@@ -493,7 +510,7 @@ async def cancel_payment(_, query: CallbackQuery):
 
 
 # ======================================================
-# 🛂 ADMIN APPROVAL (Same as before)
+# 🛂 ADMIN APPROVAL
 # ======================================================
 
 async def update_user_premium(uid, plan_txt, amount):
@@ -608,6 +625,3 @@ Please contact support or try again with correct details.
         query.message.caption + f"\n\n❌ **REJECTED** by @{query.from_user.username}\n⏰ {fmt(datetime.utcnow())}"
     )
     await query.answer("❌ Payment Rejected", show_alert=True)
-
-# Admin commands (premstats, etc) - Keep them as they were
-
