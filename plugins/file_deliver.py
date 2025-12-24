@@ -30,7 +30,7 @@ async def has_premium_or_grace(user_id: int) -> bool:
     if user_id in ADMINS:
         return True
 
-    plan = db.get_plan(user_id)
+    plan = await db.get_plan(user_id)
     if not plan or not plan.get("premium"):
         return False
 
@@ -73,35 +73,42 @@ async def file_button_handler(client: Client, query: CallbackQuery):
         return
     
     # ========================================
-    # NON-PREMIUM: SHORTLINK (Even if Group Admin)
+    # NON-PREMIUM: Show Premium Required Message
     # ========================================
-    # Check if shortlink is enabled for this group
-    if settings.get("shortlink"):
-        shortlink_url = settings.get("url")
-        shortlink_api = settings.get("api")
-        
-        if shortlink_url and shortlink_api:
-            # Generate shortlink
-            link = await get_shortlink(
-                shortlink_url,
-                shortlink_api,
-                f"https://t.me/{temp.U_NAME}?start=file_{group_id}_{file_id}"
-            )
-            
-            # Send shortlink button
-            return await query.message.reply_text(
-                f"<b>📁 {file['file_name']}</b>\n"
-                f"📦 <b>Size:</b> {get_size(file['file_size'])}\n\n"
-                f"🔒 <b>Click the button below to get the file</b>",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🚀 Get File", url=link)],
-                    [InlineKeyboardButton("❌ Close", callback_data="close_data")]
-                ])
-            )
+    text = (
+        "🔒 <b>Premium Required</b>\n\n"
+        "PM search is only available for premium users.\n\n"
+        "💎 Get unlimited search access\n"
+        "⚡ Faster responses\n"
+        "🎯 Priority support\n\n"
+        "Upgrade now to unlock this feature!"
+    )
     
-    # If no shortlink configured, send direct PM link
+    btn = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "💰 Buy / Renew Premium",
+                callback_data="buy_premium"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Close",
+                callback_data="close_data"
+            )
+        ]
+    ])
+    
+    # Send premium required message
+    await query.message.reply_text(
+        text,
+        reply_markup=btn,
+        quote=True
+    )
+    
     await query.answer(
-        url=f"https://t.me/{temp.U_NAME}?start=file_{group_id}_{file_id}"
+        "🔒 Premium required for PM file access",
+        show_alert=True
     )
 
 
@@ -132,12 +139,32 @@ async def start_file_delivery(client: Client, message):
     
     if not is_user_premium:
         # Non-premium user tried to access file directly
-        # This should only happen if they bypassed shortlink
-        await message.reply_text(
+        text = (
             "🔒 <b>Premium Required</b>\n\n"
-            "Direct file access is only available for premium users.\n"
-            "Please use the shortlink button in the group."
+            "Direct file access is only available for premium users.\n\n"
+            "💎 Get unlimited search access\n"
+            "⚡ Faster responses\n"
+            "🎯 Priority support\n\n"
+            "Upgrade now to unlock this feature!"
         )
+        
+        btn = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "💰 Buy / Renew Premium",
+                    callback_data="buy_premium"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Close",
+                    callback_data="close_data"
+                )
+            ]
+        ])
+        
+        await message.reply_text(text, reply_markup=btn)
+        
         # Delete /start command
         try:
             await message.delete()
@@ -178,6 +205,10 @@ async def start_file_delivery(client: Client, message):
 async def schedule_file_deletion(client, sent_msg, uid, file_id):
     """Schedule auto-deletion of file message"""
     msg_id = sent_msg.id
+    
+    # Check if temp.FILES exists
+    if not hasattr(temp, 'FILES'):
+        temp.FILES = {}
     
     # Track in temp storage
     temp.FILES[msg_id] = {
@@ -239,11 +270,25 @@ async def deliver_file(client, uid, grp_id, file_id):
 
         # Verify premium status again (security check)
         if not await has_premium_or_grace(uid):
-            await client.send_message(
-                uid,
+            text = (
                 "🔒 <b>Premium Required</b>\n\n"
-                "This file is only accessible to premium users."
+                "This file is only accessible to premium users.\n\n"
+                "💎 Get unlimited search access\n"
+                "⚡ Faster responses\n"
+                "🎯 Priority support\n\n"
+                "Upgrade now to unlock this feature!"
             )
+            
+            btn = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "💰 Buy / Renew Premium",
+                        callback_data="buy_premium"
+                    )
+                ]
+            ])
+            
+            await client.send_message(uid, text, reply_markup=btn)
             return
 
         # Get group settings (for additional checks)
@@ -297,8 +342,8 @@ async def deliver_file(client, uid, grp_id, file_id):
         
         deletion_task.add_done_callback(cleanup_deletion)
         
-    except Exception:
-        pass
+    except Exception as e:
+        logging.error(f"Error delivering file: {e}")
 
 
 # ======================================================
