@@ -40,6 +40,7 @@ class temp(object):
     FILES = {}          # msg_id -> delivery data
     PREMIUM = {}        # RAM premium cache
     KEYWORDS = {}       # learned keywords (RAM)
+    BANNED_USERS = set()  # ✅ FIX: Added banned users set
 
     INDEX_STATS = {
         "running": False,
@@ -56,21 +57,22 @@ class temp(object):
 
 
 # ======================================================
-# 👑 PREMIUM CONFIG (Koyeb Optimized)
+# 👑 PREMIUM CONFIG (Synced with premium.py)
 # ======================================================
 
-GRACE_PERIOD = timedelta(minutes=20)
+GRACE_PERIOD = timedelta(minutes=30)  # ✅ Synced: Changed from 20 to 30
 PREMIUM_CACHE_TTL = 600  # 10 min cache
 
 
 # ======================================================
-# ⚡ ULTRA FAST PREMIUM CHECK
+# ⚡ ULTRA FAST PREMIUM CHECK (Synced with premium.py)
 # ======================================================
 
 async def is_premium(user_id, bot=None) -> bool:
     """
     Koyeb optimized premium check with extended cache
     Returns True if user is premium, False otherwise
+    Synced with premium.py grace period logic
     """
     # Admins always have premium
     if user_id in ADMINS:
@@ -124,6 +126,24 @@ async def is_premium(user_id, bot=None) -> bool:
     # Cache and return
     temp.PREMIUM[user_id] = {"expire": expire, "checked_at": now_ts}
     return True
+
+
+# ======================================================
+# 📅 DATETIME HELPERS (For premium.py compatibility)
+# ======================================================
+
+def get_expiry_datetime(expire):
+    """Convert expire timestamp/datetime to datetime object"""
+    if isinstance(expire, (int, float)):
+        return datetime.utcfromtimestamp(expire)
+    return expire
+
+
+def fmt(dt):
+    """Format datetime to readable string"""
+    if isinstance(dt, (int, float)):
+        dt = datetime.utcfromtimestamp(dt)
+    return dt.strftime("%d %b %Y, %I:%M %p")
 
 
 # ======================================================
