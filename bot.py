@@ -46,6 +46,76 @@ def ist_time():
 
 
 # ==========================
+# ⭐ PREMIUM AUTO-REMOVE BACKGROUND TASK
+# ==========================
+async def check_and_remove_expired_premium(client):
+    """
+    Background task to automatically remove expired premium users
+    Runs every hour
+    """
+    logger.info("✅ Premium expiry checker started")
+    
+    while True:
+        try:
+            users = await db.get_premium_users()
+            now = datetime.utcnow()
+            removed_count = 0
+            
+            for user in users:
+                try:
+                    plan = user.get("plan", {})
+                    expire = plan.get("expire")
+                    
+                    if not expire:
+                        continue
+                    
+                    # Convert to datetime
+                    if isinstance(expire, (int, float)):
+                        exp_dt = datetime.utcfromtimestamp(expire)
+                    else:
+                        exp_dt = expire
+                    
+                    # Check if expired
+                    if exp_dt <= now:
+                        uid = user.get("_id") or user.get("id")
+                        
+                        # Remove premium status
+                        await db.update_plan(uid, {
+                            "premium": False,
+                            "plan": None,
+                            "expire": None
+                        })
+                        
+                        removed_count += 1
+                        logger.info(f"✅ Removed expired premium for user {uid}")
+                        
+                        # Optional: Notify user
+                        try:
+                            await client.send_message(
+                                uid,
+                                "⚠️ **Premium Expired**\n\n"
+                                "Your premium subscription has ended.\n"
+                                "Use /plan to renew and continue enjoying premium benefits!"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Could not notify user {uid}: {e}")
+                
+                except Exception as e:
+                    logger.error(f"Error processing user premium expiry: {e}")
+                    continue
+            
+            if removed_count > 0:
+                logger.info(f"✅ Removed {removed_count} expired premium users")
+            
+            # Check every hour (3600 seconds)
+            await asyncio.sleep(3600)
+            
+        except Exception as e:
+            logger.error(f"❌ Error in check_and_remove_expired_premium: {e}")
+            await asyncio.sleep(600)  # Wait 10 minutes on error
+
+
+# ==========================
 # 🧪 GLOBAL DEBUG: /START LOGGER
 # ==========================
 @Client.on_message(filters.private & filters.command("start"))
@@ -116,6 +186,10 @@ class Bot(Client):
         # 🚫 AUTO UNBAN WORKER
         asyncio.create_task(auto_unban_worker(self))
 
+        # ⭐ PREMIUM AUTO-REMOVE (NEW)
+        asyncio.create_task(check_and_remove_expired_premium(self))
+        logger.info("✅ Premium auto-remove task started")
+
         # ---- admin notify ----
         for admin in ADMINS:
             try:
@@ -123,7 +197,8 @@ class Bot(Client):
                     admin,
                     "♻️ **Bot Restarted Successfully**\n\n"
                     f"🕒 Time: {ist_time()}\n"
-                    "🤖 Status: Online & Stable"
+                    "🤖 Status: Online & Stable\n"
+                    "⭐ Premium System: Active"
                 )
             except:
                 pass
@@ -133,7 +208,8 @@ class Bot(Client):
             await self.send_message(
                 LOG_CHANNEL,
                 f"🤖 <b>@{me.username} started successfully</b>\n"
-                f"🕒 {ist_time()}"
+                f"🕒 {ist_time()}\n"
+                "⭐ Premium auto-remove: Active"
             )
         except:
             pass
