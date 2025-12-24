@@ -119,7 +119,7 @@ def update_message_activity(message_id):
 
 
 # =====================================================
-# 📩 MESSAGE HANDLER (✅ FIXED)
+# 📩 MESSAGE HANDLER (✅ FULLY FIXED)
 # =====================================================
 @Client.on_message(filters.text & filters.incoming & (filters.group | filters.private))
 async def filter_handler(client, message):
@@ -136,38 +136,63 @@ async def filter_handler(client, message):
             return
 
         # ==============================
-        # ✅ PREMIUM CHECK (ONE TIME ONLY)
+        # ✅ CHECK: GROUP or PM
         # ==============================
-        user_is_premium = False
-        if user_id not in ADMINS:
-            try:
-                user_is_premium = await is_premium(user_id, client)
-            except Exception as e:
-                print(f"Premium check error: {e}")
-                user_is_premium = False
+        is_group_chat = message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP)
 
         # ==============================
-        # 🛡️ RATE LIMIT (Non-Premium only)
+        # 📩 PM SEARCH - CHECK PREMIUM FIRST
         # ==============================
-        if user_id not in ADMINS and not user_is_premium:
-            if is_rate_limited(user_id):
-                text = (
-                    "⚠️ <b>Too many searches!</b>\n\n"
-                    "Please wait a moment before searching again.\n\n"
-                    "💡 <b>Tip:</b> Premium users get unlimited searches!"
-                )
-                return await message.reply_text(text, quote=True)
+        if not is_group_chat:
+            # Admin always allowed
+            if user_id not in ADMINS:
+                # Check premium status
+                try:
+                    user_is_premium = await is_premium(user_id, client)
+                except Exception as e:
+                    print(f"Premium check error for {user_id}: {e}")
+                    user_is_premium = False
+                
+                # Block non-premium users
+                if not user_is_premium:
+                    text = (
+                        "🔒 <b>Premium Required</b>\n\n"
+                        "PM search is only available for premium users.\n\n"
+                        "💎 Get unlimited search access\n"
+                        "⚡ Faster responses\n"
+                        "🎯 Priority support\n\n"
+                        "Upgrade now to unlock this feature!"
+                    )
 
-        # 🔥 auto-learn keywords (RAM only, ultra fast)
-        try:
-            learn_keywords(raw_search)
-        except Exception as e:
-            print(f"Keyword learning error: {e}")
+                    btn = InlineKeyboardMarkup(
+                        [[
+                            InlineKeyboardButton(
+                                "💰 Buy / Renew Premium",
+                                callback_data="buy_premium"
+                            )
+                        ]]
+                    )
+                    
+                    # Send message and return immediately
+                    try:
+                        await message.reply_text(text, reply_markup=btn, quote=True)
+                    except Exception as e:
+                        print(f"Failed to send premium message: {e}")
+                        await message.reply_text(
+                            "🔒 PM search requires premium subscription.",
+                            quote=True
+                        )
+                    return
+
+            # If we reach here, user is premium or admin
+            chat_id = user_id
+            source_chat_id = 0
+            is_pm = True
 
         # ==============================
         # 🚫 GROUP SEARCH
         # ==============================
-        if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
+        else:
             stg = await db.get_settings(message.chat.id)
             if not stg or stg.get("search") is False:
                 return
@@ -176,31 +201,27 @@ async def filter_handler(client, message):
             source_chat_id = message.chat.id
             is_pm = False
 
-        # ==============================
-        # 📩 PM SEARCH (✅ FIXED - PREMIUM + ADMIN)
-        # ==============================
-        else:
-            chat_id = user_id
-            source_chat_id = 0
-            is_pm = True
-
-            # ✅ Block only non-premium & non-admin
-            if user_id not in ADMINS and not user_is_premium:
-                text = (
-                    "🔒 <b>Premium Required</b>\n\n"
-                    "This feature is for premium users only.\n"
-                    "Upgrade now to unlock unlimited search."
-                )
-
-                btn = InlineKeyboardMarkup(
-                    [[
-                        InlineKeyboardButton(
-                            "💳 Renew via UPI",
-                            url=f"upi://pay?pa={UPI_ID}&pn={UPI_NAME}&cu=INR"
+            # Rate limit check for groups (non-premium users only)
+            if user_id not in ADMINS:
+                try:
+                    user_is_premium = await is_premium(user_id, client)
+                except:
+                    user_is_premium = False
+                
+                if not user_is_premium:
+                    if is_rate_limited(user_id):
+                        text = (
+                            "⚠️ <b>Too many searches!</b>\n\n"
+                            "Please wait a moment before searching again.\n\n"
+                            "💡 <b>Tip:</b> Premium users get unlimited searches!"
                         )
-                    ]]
-                )
-                return await client.send_message(chat_id, text, reply_markup=btn)
+                        return await message.reply_text(text, quote=True)
+
+        # 🔥 auto-learn keywords (RAM only, ultra fast)
+        try:
+            learn_keywords(raw_search)
+        except Exception as e:
+            print(f"Keyword learning error: {e}")
 
         # 🧹 Sanitize and normalize search
         search = sanitize_search(raw_search)
@@ -220,6 +241,8 @@ async def filter_handler(client, message):
     
     except Exception as e:
         print(f"Filter handler error: {e}")
+        import traceback
+        traceback.print_exc()
         try:
             await message.reply_text(
                 "❌ An error occurred. Please try again.",
@@ -353,6 +376,8 @@ async def send_results(
     
     except Exception as e:
         print(f"Send results error: {e}")
+        import traceback
+        traceback.print_exc()
         error_text = "❌ An error occurred while fetching results."
         try:
             if message:
@@ -408,6 +433,8 @@ async def pagination_handler(client, query):
     
     except Exception as e:
         print(f"Pagination handler error: {e}")
+        import traceback
+        traceback.print_exc()
         try:
             await query.answer("❌ An error occurred", show_alert=True)
         except:
