@@ -61,19 +61,103 @@ async def user_info(client, message):
 
 
 # ======================================================
-# ⏱️ UPTIME
+# 🆔 ID COMMAND - Get User/Group/Channel IDs (ULTRA PREMIUM UI)
 # ======================================================
 
-@Client.on_message(filters.command("uptime"))
-async def uptime_cmd(client, message):
-    uptime = int(time.time() - temp.START_TIME)
-    h = uptime // 3600
-    m = (uptime % 3600) // 60
-
-    await message.reply_text(
-        f"⏱️ <b>Bot Uptime</b>\n\n<code>{h}h {m}m</code>",
-        parse_mode=enums.ParseMode.HTML
-    )
+@Client.on_message(filters.command("id"))
+async def get_id(client, message):
+    """Get ID of user, group, or channel with PREMIUM ADVANCED UI"""
+    
+    # Header with premium styling
+    text = "╔════════════════════════════╗\n"
+    text += "║   🆔 <b>IDENTITY SCANNER</b>   ║\n"
+    text += "╚════════════════════════════╝\n\n"
+    
+    # If reply to a message
+    if message.reply_to_message:
+        replied_user = message.reply_to_message.from_user
+        if replied_user:
+            text += "╭─────────────────────────╮\n"
+            text += "│ 👤 <b>REPLIED USER DETECTED</b> │\n"
+            text += "╰─────────────────────────╯\n"
+            text += f"┌ 📛 <b>Name</b>\n"
+            text += f"│ ➜ <i>{replied_user.first_name or ''} {replied_user.last_name or ''}</i>\n"
+            text += f"├ 🔖 <b>User ID</b>\n"
+            text += f"│ ➜ <code>{replied_user.id}</code>\n"
+            text += f"├ 🏷️ <b>Username</b>\n"
+            text += f"│ ➜ @{replied_user.username if replied_user.username else '❌ Not Set'}\n"
+            text += f"└ 🔗 <b>Profile Link</b>\n"
+            text += f"  ➜ <a href='tg://user?id={replied_user.id}'>Click Here</a>\n\n"
+        
+        # If forwarded message
+        if message.reply_to_message.forward_from:
+            fwd_user = message.reply_to_message.forward_from
+            text += "╭─────────────────────────╮\n"
+            text += "│ 📤 <b>FORWARDED MESSAGE</b>   │\n"
+            text += "╰─────────────────────────╯\n"
+            text += f"┌ 📛 <b>Original Sender</b>\n"
+            text += f"│ ➜ <i>{fwd_user.first_name or ''} {fwd_user.last_name or ''}</i>\n"
+            text += f"├ 🔖 <b>Sender ID</b>\n"
+            text += f"│ ➜ <code>{fwd_user.id}</code>\n"
+            text += f"└ 🏷️ <b>Username</b>\n"
+            text += f"  ➜ @{fwd_user.username if fwd_user.username else '❌ Not Set'}\n\n"
+        
+        # If forwarded from channel
+        if message.reply_to_message.forward_from_chat:
+            fwd_chat = message.reply_to_message.forward_from_chat
+            chat_type_emoji = "📢" if fwd_chat.type == enums.ChatType.CHANNEL else "👥"
+            chat_type_name = "CHANNEL" if fwd_chat.type == enums.ChatType.CHANNEL else "GROUP"
+            text += f"╭─────────────────────────╮\n"
+            text += f"│ {chat_type_emoji} <b>SOURCE {chat_type_name}</b>      │\n"
+            text += f"╰─────────────────────────╯\n"
+            text += f"┌ 📛 <b>Title</b>\n"
+            text += f"│ ➜ <i>{fwd_chat.title}</i>\n"
+            text += f"├ 🔖 <b>Chat ID</b>\n"
+            text += f"│ ➜ <code>{fwd_chat.id}</code>\n"
+            text += f"└ 🏷️ <b>Username</b>\n"
+            text += f"  ➜ @{fwd_chat.username if fwd_chat.username else '❌ Not Set'}\n\n"
+    
+    # Current user info (ALWAYS SHOW)
+    text += "╭─────────────────────────╮\n"
+    text += "│ 🙋‍♂️ <b>YOUR IDENTITY</b>      │\n"
+    text += "╰─────────────────────────╯\n"
+    text += f"┌ 📛 <b>Name</b>\n"
+    text += f"│ ➜ <i>{message.from_user.first_name or ''} {message.from_user.last_name or ''}</i>\n"
+    text += f"├ 🔖 <b>User ID</b>\n"
+    text += f"│ ➜ <code>{message.from_user.id}</code>\n"
+    text += f"├ 🏷️ <b>Username</b>\n"
+    text += f"│ ➜ @{message.from_user.username if message.from_user.username else '❌ Not Set'}\n"
+    text += f"└ 🔗 <b>Profile Link</b>\n"
+    text += f"  ➜ <a href='tg://user?id={message.from_user.id}'>Click Here</a>\n\n"
+    
+    # Chat info (if in group/channel)
+    if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
+        text += "╭─────────────────────────╮\n"
+        text += "│ 👥 <b>GROUP INFORMATION</b>  │\n"
+        text += "╰─────────────────────────╯\n"
+        text += f"┌ 📛 <b>Title</b>\n"
+        text += f"│ ➜ <i>{message.chat.title}</i>\n"
+        text += f"├ 🔖 <b>Group ID</b>\n"
+        text += f"│ ➜ <code>{message.chat.id}</code>\n"
+        text += f"└ 🏷️ <b>Username</b>\n"
+        text += f"  ➜ @{message.chat.username if message.chat.username else '❌ Not Set'}\n\n"
+    elif message.chat.type == enums.ChatType.CHANNEL:
+        text += "╭─────────────────────────╮\n"
+        text += "│ 📢 <b>CHANNEL INFO</b>        │\n"
+        text += "╰─────────────────────────╯\n"
+        text += f"┌ 📛 <b>Title</b>\n"
+        text += f"│ ➜ <i>{message.chat.title}</i>\n"
+        text += f"├ 🔖 <b>Channel ID</b>\n"
+        text += f"│ ➜ <code>{message.chat.id}</code>\n"
+        text += f"└ 🏷️ <b>Username</b>\n"
+        text += f"  ➜ @{message.chat.username if message.chat.username else '❌ Not Set'}\n\n"
+    
+    # Footer
+    text += "╔════════════════════════════╗\n"
+    text += "║ ⚡ <b>POWERED BY ULTRA-PRO</b> ║\n"
+    text += "╚════════════════════════════╝"
+    
+    await message.reply_text(text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
 
 
 # ======================================================
