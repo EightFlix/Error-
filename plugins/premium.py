@@ -18,7 +18,7 @@ from utils import is_premium
 
 LISTEN_SHORT = 180
 LISTEN_LONG = 300
-active_sessions = set()
+active_sessions = {}  # Changed to dict to store number
 
 
 # ======================================================
@@ -37,10 +37,17 @@ def parse_duration(text: str):
     if not text:
         return None
     text = text.lower().strip()
-    num = int("".join(filter(str.isdigit, text)) or 0)
+    
+    # Extract number
+    num_str = "".join(filter(str.isdigit, text))
+    if not num_str:
+        return None
+    
+    num = int(num_str)
     if num <= 0:
         return None
     
+    # Convert to days (always return days-based timedelta)
     if "day" in text:
         return timedelta(days=num)
     if "month" in text:
@@ -49,6 +56,7 @@ def parse_duration(text: str):
         return timedelta(days=365 * num)
     if "hour" in text:
         return timedelta(hours=num)
+    
     return None
 
 
@@ -105,6 +113,23 @@ def cancel_btn():
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("❌ Cancel", callback_data="cancel_payment")
     ]])
+
+
+def duration_buttons(num):
+    """Generate duration selection buttons based on number"""
+    hours_price = max(1, (num // 24) or 1) * PRE_DAY_AMOUNT
+    days_price = num * PRE_DAY_AMOUNT
+    months_price = num * 30 * PRE_DAY_AMOUNT
+    years_price = num * 365 * PRE_DAY_AMOUNT
+    
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⏰ {num} Hours (₹{hours_price})", callback_data=f"dur#{num}#hour")],
+        [InlineKeyboardButton(f"📅 {num} Days (₹{days_price})", callback_data=f"dur#{num}#day")],
+        [InlineKeyboardButton(f"📆 {num} Months (₹{months_price})", callback_data=f"dur#{num}#month")],
+        [InlineKeyboardButton(f"🗓️ {num} Years (₹{years_price})", callback_data=f"dur#{num}#year")],
+        [InlineKeyboardButton("🔄 Re-enter Number", callback_data="buy_premium")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_payment")]
+    ])
 
 
 def myplan_buttons():
@@ -256,18 +281,21 @@ async def buy_premium(client, query: CallbackQuery):
     if uid in active_sessions:
         return await query.answer("⚠️ You already have an active payment session", show_alert=True)
     
-    active_sessions.add(uid)
+    active_sessions[uid] = {"step": "waiting_number"}
     
     await query.message.edit(
         """
-🕒 **Enter Duration**
+🔢 **Enter a Number**
 
-Send duration in this format:
-• `1 day` or `7 days`
-• `1 month` or `3 months`
-• `1 year`
+Just send a number (e.g., 7, 30, 365)
 
-💡 Example: `30 days` or `1 month`
+Then you can choose:
+• Hours
+• Days
+• Months
+• Years
+
+💡 Example: `7` or `30` or `365`
 """,
         reply_markup=cancel_btn()
     )
@@ -276,34 +304,118 @@ Send duration in this format:
         msg = await client.listen(query.message.chat.id, filters=filters.user(uid), timeout=LISTEN_SHORT)
         
         if not msg.text:
-            raise ValueError("No text received")
+            active_sessions.pop(uid, None)
+            await query.message.edit(
+                "❌ Please send a number\n\n💡 Example: `7` or `30`",
+                reply_markup=buy_btn()
+            )
+            return
         
-        duration = parse_duration(msg.text)
-        if not duration:
-            raise ValueError("Invalid duration format")
+        # Extract number
+        num_str = "".join(filter(str.isdigit, msg.text))
+        if not num_str:
+            active_sessions.pop(uid, None)
+            await query.message.edit(
+                "❌ Invalid number\n\nPlease send only numbers like: `7` or `30`",
+                reply_markup=buy_btn()
+            )
+            return
+        
+        num = int(num_str)
+        if num <= 0 or num > 9999:
+            active_sessions.pop(uid, None)
+            await query.message.edit(
+                "❌ Invalid number (1-9999)\n\nPlease send a number between 1 and 9999",
+                reply_markup=buy_btn()
+            )
+            return
+        
+        # Store number and show duration options
+        active_sessions[uid] = {"step": "waiting_duration", "number": num}
+        
+        await query.message.edit(
+            f"""
+✅ Number: **{num}**
+
+Now select your duration:
+""",
+            reply_markup=duration_buttons(num)
+        )
     
     except asyncio.TimeoutError:
-        active_sessions.discard(uid)
-        return await query.message.edit("⏱️ Timeout! Payment cancelled.")
-    except Exception:
-        active_sessions.discard(uid)
-        return await query.message.edit("❌ Invalid duration format\n\nPlease try again with: `7 days` or `1 month`")
+        active_sessions.pop(uid, None)
+        return await query.message.edit("⏱️ Timeout! Payment cancelled.", reply_markup=buy_btn())
+    except Exception as e:
+        active_sessions.pop(uid, None)
+        return await query.message.edit(
+            f"❌ Error: {str(e)}\n\nPlease try again",
+            reply_markup=buy_btn()
+        )
+
+
+@Client.on_callback_query(filters.regex("^dur#"))
+async def duration_selected(client, query: CallbackQuery):
+    """Handle duration selection"""
+    uid = query.from_user.id
     
-    days = max(1, duration.days)
+    if uid not in active_sessions:
+        return await query.answer("⚠️ Session expired. Please start again.", show_alert=True)
+    
+    try:
+        _, num_str, unit = query.data.split("#")
+        num = int(num_str)
+    except:
+        return await query.answer("❌ Invalid data", show_alert=True)
+    
+    # Map units to display names
+    unit_map = {
+        "hour": "Hours",
+        "day": "Days",
+        "month": "Months",
+        "year": "Years"
+    }
+    
+    unit_display = unit_map.get(unit, unit)
+    plan_text = f"{num} {unit_display}"
+    
+    # Calculate duration
+    if unit == "hour":
+        duration = timedelta(hours=num)
+        days = max(1, (num // 24) or 1)
+    elif unit == "day":
+        duration = timedelta(days=num)
+        days = num
+    elif unit == "month":
+        duration = timedelta(days=30 * num)
+        days = 30 * num
+    elif unit == "year":
+        duration = timedelta(days=365 * num)
+        days = 365 * num
+    else:
+        return await query.answer("❌ Invalid unit", show_alert=True)
+    
     amount = days * PRE_DAY_AMOUNT
-    plan_text = msg.text.strip()
+    
+    # Update session
+    active_sessions[uid] = {
+        "step": "waiting_screenshot",
+        "plan_text": plan_text,
+        "amount": amount,
+        "days": days
+    }
     
     # Generate UPI QR code
-    upi_url = f"upi://pay?pa={UPI_ID}&pn={UPI_NAME}&am={amount}&cu=INR"
-    qr = qrcode.make(upi_url)
-    bio = BytesIO()
-    qr.save(bio, "PNG")
-    bio.seek(0)
-    bio.name = "qr_code.png"
-    
-    await query.message.reply_photo(
-        bio,
-        caption=f"""
+    try:
+        upi_url = f"upi://pay?pa={UPI_ID}&pn={UPI_NAME}&am={amount}&cu=INR"
+        qr = qrcode.make(upi_url)
+        bio = BytesIO()
+        qr.save(bio, "PNG")
+        bio.seek(0)
+        bio.name = "qr_code.png"
+        
+        await query.message.reply_photo(
+            bio,
+            caption=f"""
 💰 **Payment Details**
 
 📦 **Plan:** {plan_text}
@@ -314,21 +426,47 @@ Send duration in this format:
 
 📸 **Next Step:** Send payment screenshot after completing payment
 """,
-        reply_markup=cancel_btn()
-    )
+            reply_markup=cancel_btn()
+        )
+        
+        # Delete the duration selection message
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
+    except Exception as e:
+        active_sessions.pop(uid, None)
+        return await query.answer(f"❌ Error: {str(e)}", show_alert=True)
     
+    # Wait for screenshot
     try:
-        receipt = await client.listen(query.message.chat.id, filters=filters.user(uid) & filters.photo, timeout=LISTEN_LONG)
+        receipt = await client.listen(
+            query.message.chat.id, 
+            filters=filters.user(uid) & filters.photo, 
+            timeout=LISTEN_LONG
+        )
         
         if not receipt.photo:
-            raise ValueError("No photo received")
+            active_sessions.pop(uid, None)
+            await query.message.reply(
+                "❌ Screenshot not received. Please send a photo.",
+                reply_markup=buy_btn()
+            )
+            return
     
     except asyncio.TimeoutError:
-        active_sessions.discard(uid)
-        return await query.message.reply("⏱️ Timeout! Screenshot not received. Payment cancelled.")
-    except Exception:
-        active_sessions.discard(uid)
-        return await query.message.reply("❌ Screenshot not received. Please try again.")
+        active_sessions.pop(uid, None)
+        return await query.message.reply(
+            "⏱️ Timeout! Screenshot not received. Payment cancelled.",
+            reply_markup=buy_btn()
+        )
+    except Exception as e:
+        active_sessions.pop(uid, None)
+        return await query.message.reply(
+            f"❌ Error: {str(e)}",
+            reply_markup=buy_btn()
+        )
     
     # Send to admin for approval
     buttons = InlineKeyboardMarkup([[
@@ -356,18 +494,21 @@ Send duration in this format:
             reply_markup=buttons
         )
     except Exception as e:
-        active_sessions.discard(uid)
-        return await receipt.reply(f"❌ Error sending to admin: {e}")
+        active_sessions.pop(uid, None)
+        return await receipt.reply(
+            f"❌ Error sending to admin: {str(e)}",
+            reply_markup=buy_btn()
+        )
     
     await receipt.reply("✅ **Screenshot received!**\n\n⏳ Your payment is being reviewed by admin.\nYou'll be notified once approved.")
-    active_sessions.discard(uid)
+    active_sessions.pop(uid, None)
 
 
 @Client.on_callback_query(filters.regex("^cancel_payment$"))
 async def cancel_payment(_, query: CallbackQuery):
     """Cancel payment flow"""
-    active_sessions.discard(query.from_user.id)
-    await query.message.edit("❌ Payment process cancelled")
+    active_sessions.pop(query.from_user.id, None)
+    await query.message.edit("❌ Payment process cancelled", reply_markup=buy_btn())
     await query.answer("Cancelled", show_alert=False)
 
 
@@ -383,6 +524,11 @@ async def update_user_premium(uid, plan_txt, amount):
     
     now = datetime.utcnow()
     old = await db.get_plan(uid) or {}
+    
+    # Calculate days
+    if duration.days == 0 and duration.seconds > 0:
+        days = max(1, (duration.seconds // 3600) // 24 + 1)
+        duration = timedelta(days=days)
     
     # Calculate expiry date
     expire = old.get("expire")
@@ -432,7 +578,9 @@ async def approve_payment(client, query: CallbackQuery):
     
     result = await update_user_premium(uid, plan_txt, amount)
     if not result:
-        return await query.message.edit("❌ Invalid plan duration")
+        return await query.message.edit_caption(
+            query.message.caption + "\n\n❌ **FAILED** - Invalid plan duration"
+        )
     
     expire_dt, invoice = result
     
