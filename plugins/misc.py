@@ -1,8 +1,6 @@
 import time
-import os
 import sys
 import platform
-from datetime import datetime
 
 from hydrogram import Client, filters, enums
 from hydrogram.errors import UserNotParticipant
@@ -11,99 +9,83 @@ from info import IS_PREMIUM
 
 
 # ======================================================
-# 👤 USER INFO
+# 🆔 ID COMMAND (PM + GROUP | USER + STICKER | ADMIN BADGE)
 # ======================================================
 
-@Client.on_message(filters.command("info"))
-async def user_info(client, message):
-    status = await message.reply_text("🔍 Fetching user info…")
-
-    user_id = (
-        message.reply_to_message.from_user.id
-        if message.reply_to_message
-        else message.from_user.id
-    )
-
-    try:
-        user = await client.get_users(user_id)
-    except Exception as e:
-        return await status.edit(f"❌ Error: {e}")
-
-    text = (
-        f"👤 <b>USER INFO</b>\n\n"
-        f"• <b>Name:</b> {user.first_name or ''} {user.last_name or ''}\n"
-        f"• <b>User ID:</b> <code>{user.id}</code>\n"
-        f"• <b>Username:</b> @{user.username if user.username else 'N/A'}\n"
-        f"• <b>DC ID:</b> <code>{user.dc_id or 'Unknown'}</code>\n"
-        f"• <b>Status:</b> {last_online(user)}\n"
-        f"• <b>Profile:</b> <a href='tg://user?id={user.id}'>Open</a>\n"
-    )
-
-    if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
-        try:
-            member = await message.chat.get_member(user.id)
-            if member.joined_date:
-                text += f"• <b>Joined:</b> <code>{member.joined_date.strftime('%d %b %Y')}</code>\n"
-        except UserNotParticipant:
-            pass
-
-    if user.photo:
-        photo = await client.download_media(user.photo.big_file_id)
-        await message.reply_photo(photo, caption=text, parse_mode=enums.ParseMode.HTML)
-        os.remove(photo)
-    else:
-        await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
-
-    await status.delete()
-
-
-# ======================================================
-# 🆔 ID COMMAND (PHOTO + CAPTION | CLEAN UI)
-# ======================================================
-
-@Client.on_message(filters.command("id") & filters.group)
+@Client.on_message(filters.command("id"))
 async def get_id(client, message):
-    # target user (reply or self)
+
+    reply = message.reply_to_message
+
+    # ---------- USER TARGET ----------
     user = (
-        message.reply_to_message.from_user
-        if message.reply_to_message and message.reply_to_message.from_user
+        reply.from_user
+        if reply and reply.from_user
         else message.from_user
     )
 
-    caption = (
+    # ---------- ADMIN BADGE ----------
+    badge = "👤 Member"
+    if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
+        try:
+            member = await message.chat.get_member(user.id)
+            if member.status == enums.ChatMemberStatus.OWNER:
+                badge = "👑 Owner"
+            elif member.status in (
+                enums.ChatMemberStatus.ADMINISTRATOR,
+                enums.ChatMemberStatus.ADMIN
+            ):
+                badge = "🛡 Admin"
+        except Exception:
+            pass
+
+    # ---------- USER INFO ----------
+    text = (
         "🆔 <b>ID INFORMATION</b>\n\n"
         f"👤 <b>Name:</b> {user.first_name or ''} {user.last_name or ''}\n"
-        f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
+        f"🦹 <b>User ID:</b> <code>{user.id}</code>\n"
         f"🏷 <b>Username:</b> @{user.username if user.username else 'N/A'}\n"
         f"🌐 <b>DC ID:</b> <code>{user.dc_id or 'Unknown'}</code>\n"
         f"🤖 <b>Bot:</b> {'Yes' if user.is_bot else 'No'}\n"
-        f"🔗 <b>Profile:</b> <a href='tg://user?id={user.id}'>Open</a>\n\n"
+        f"{badge}\n"
+        f"🔗 <b>Profile:</b> <a href='tg://user?id={user.id}'>Open</a>\n"
     )
 
+    # ---------- CHAT & MESSAGE INFO ----------
+    text += (
+        "\n💬 <b>CHAT & MESSAGE INFO</b>\n\n"
+        f"🆔 <b>Chat ID:</b> <code>{message.chat.id}</code>\n"
+        f"🏷 <b>Chat Type:</b> <code>{message.chat.type.name}</code>\n"
+        f"📩 <b>Message ID:</b> <code>{message.id}</code>\n"
+    )
+
+    # ---------- GROUP INFO ----------
     if message.chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
-        caption += (
-            "👥 <b>Group Info</b>\n"
-            f"• <b>Title:</b> {message.chat.title}\n"
-            f"• <b>Group ID:</b> <code>{message.chat.id}</code>\n"
-            f"• <b>Username:</b> @{message.chat.username if message.chat.username else 'N/A'}\n\n"
+        text += (
+            "\n👥 <b>GROUP INFORMATION</b>\n\n"
+            f"📛 <b>Title:</b> {message.chat.title}\n"
+            f"🆔 <b>Group ID:</b> <code>{message.chat.id}</code>\n"
+            f"🔗 <b>Username:</b> @{message.chat.username if message.chat.username else 'N/A'}\n"
         )
 
-    caption += "✨ <i>Photo • Caption • Copy Friendly</i>"
+    # ---------- STICKER INFO ----------
+    if reply and reply.sticker:
+        st = reply.sticker
+        text += (
+            "\n🎭 <b>STICKER INFORMATION</b>\n\n"
+            f"🆔 <b>File ID:</b> <code>{st.file_id}</code>\n"
+            f"📦 <b>Set Name:</b> <code>{st.set_name or 'N/A'}</code>\n"
+            f"🔖 <b>Emoji:</b> {st.emoji or 'N/A'}\n"
+            f"📐 <b>Size:</b> {st.width}×{st.height}\n"
+            f"🎞 <b>Animated:</b> {'Yes' if st.is_animated else 'No'}\n"
+            f"🧩 <b>Video:</b> {'Yes' if st.is_video else 'No'}\n"
+        )
 
-    if user.photo:
-        photo = await client.download_media(user.photo.big_file_id)
-        await message.reply_photo(
-            photo=photo,
-            caption=caption,
-            parse_mode=enums.ParseMode.HTML
-        )
-        os.remove(photo)
-    else:
-        await message.reply_text(
-            caption,
-            parse_mode=enums.ParseMode.HTML,
-            disable_web_page_preview=True
-        )
+    await message.reply_text(
+        text,
+        parse_mode=enums.ParseMode.HTML,
+        disable_web_page_preview=True
+    )
 
 
 # ======================================================
@@ -140,32 +122,6 @@ async def bot_info(client, message):
         f"📦 Library: <code>Hydrogram</code>\n"
         f"💎 Premium System: <code>{'ON' if IS_PREMIUM else 'OFF'}</code>\n"
         f"🚀 Mode: <code>Ultra-Pro</code>"
-    )
-
-    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
-
-
-# ======================================================
-# 🩺 HEALTH CHECK
-# ======================================================
-
-@Client.on_message(filters.command("health"))
-async def health_cmd(client, message):
-    start = time.time()
-    await client.get_me()
-    latency = int((time.time() - start) * 1000)
-
-    uptime = int(time.time() - temp.START_TIME)
-    h = uptime // 3600
-    m = (uptime % 3600) // 60
-
-    text = (
-        f"🩺 <b>BOT HEALTH</b>\n\n"
-        f"🟢 Status: <b>Healthy</b>\n"
-        f"⚡ Ping: <code>{latency} ms</code>\n"
-        f"⏱️ Uptime: <code>{h}h {m}m</code>\n"
-        f"💎 Premium: <code>{'Enabled' if IS_PREMIUM else 'Disabled'}</code>\n"
-        f"🚀 Performance: <code>Optimal</code>"
     )
 
     await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
