@@ -9,7 +9,11 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
+# Silence unnecessary logs
 logging.getLogger("hydrogram").setLevel(logging.ERROR)
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)  # Hide uptime bot logs
+logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
+
 logger = logging.getLogger("XFILER")
 
 
