@@ -16,8 +16,8 @@ AUTO_MUTE_TIME = 600  # 10 minutes
 
 async def is_admin(client, chat_id, user_id):
     try:
-        m = await client.get_chat_member(chat_id, user_id)
-        return m.status in (
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status in (
             enums.ChatMemberStatus.ADMINISTRATOR,
             enums.ChatMemberStatus.OWNER
         )
@@ -34,7 +34,7 @@ async def reset_warn(user_id, chat_id):
     await db.clear_warn(user_id, chat_id)
 
 # =========================
-# ADMIN COMMANDS (REPLY)
+# ADMIN MODERATION (REPLY)
 # =========================
 
 @Client.on_message(filters.group & filters.reply & filters.command("mute"))
@@ -44,10 +44,12 @@ async def mute_user(client, message):
     user = message.reply_to_message.from_user
     until = datetime.utcnow() + timedelta(seconds=AUTO_MUTE_TIME)
     await client.restrict_chat_member(
-        message.chat.id, user.id,
-        ChatPermissions(), until_date=until
+        message.chat.id,
+        user.id,
+        ChatPermissions(),
+        until_date=until
     )
-    await message.reply(f"🔇 {user.mention} muted")
+    await message.reply(f"🔇 {user.mention} has been muted")
 
 @Client.on_message(filters.group & filters.reply & filters.command("unmute"))
 async def unmute_user(client, message):
@@ -55,10 +57,11 @@ async def unmute_user(client, message):
         return
     user = message.reply_to_message.from_user
     await client.restrict_chat_member(
-        message.chat.id, user.id,
+        message.chat.id,
+        user.id,
         ChatPermissions(can_send_messages=True)
     )
-    await message.reply(f"🔊 {user.mention} unmuted")
+    await message.reply(f"🔊 {user.mention} has been unmuted")
 
 @Client.on_message(filters.group & filters.reply & filters.command("ban"))
 async def ban_user(client, message):
@@ -66,7 +69,7 @@ async def ban_user(client, message):
         return
     user = message.reply_to_message.from_user
     await client.ban_chat_member(message.chat.id, user.id)
-    await message.reply(f"🚫 {user.mention} banned")
+    await message.reply(f"🚫 {user.mention} has been banned")
 
 @Client.on_message(filters.group & filters.reply & filters.command("warn"))
 async def warn_cmd(client, message):
@@ -94,12 +97,14 @@ async def add_blacklist(client, message):
         return
     if len(message.command) < 2:
         return
-    word = message.text.split(None, 1)[1].lower()
 
+    word = message.text.split(None, 1)[1].lower()
     data = await db.get_settings(message.chat.id) or {}
-    bl = data.get("blacklist", [])
-    bl.append(word)
-    data["blacklist"] = list(set(bl))
+
+    blacklist = data.get("blacklist", [])
+    blacklist.append(word)
+
+    data["blacklist"] = list(set(blacklist))
     data.setdefault("blacklist_warn", True)
     await db.update_settings(message.chat.id, data)
 
@@ -109,31 +114,36 @@ async def remove_blacklist(client, message):
         return
     if len(message.command) < 2:
         return
-    word = message.text.split(None, 1)[1].lower()
 
+    word = message.text.split(None, 1)[1].lower()
     data = await db.get_settings(message.chat.id) or {}
-    bl = data.get("blacklist", [])
-    if word in bl:
-        bl.remove(word)
-        data["blacklist"] = bl
+    blacklist = data.get("blacklist", [])
+
+    if word in blacklist:
+        blacklist.remove(word)
+        data["blacklist"] = blacklist
         await db.update_settings(message.chat.id, data)
 
 @Client.on_message(filters.group & filters.command("blacklist"))
 async def view_blacklist(client, message):
     if not await is_admin(client, message.chat.id, message.from_user.id):
         return
+
     data = await db.get_settings(message.chat.id) or {}
-    bl = data.get("blacklist", [])
-    if not bl:
-        return await message.reply("Blacklist empty")
-    await message.reply("\n".join(f"• `{w}`" for w in bl))
+    blacklist = data.get("blacklist", [])
+
+    if not blacklist:
+        return await message.reply("📭 Blacklist is empty")
+
+    await message.reply("\n".join(f"• `{w}`" for w in blacklist))
 
 @Client.on_message(filters.group & filters.command("blacklistwarn"))
-async def blacklist_warn_toggle(client, message):
+async def blacklistwarn(client, message):
     if not await is_admin(client, message.chat.id, message.from_user.id):
         return
     if len(message.command) < 2:
         return
+
     data = await db.get_settings(message.chat.id) or {}
     data["blacklist_warn"] = message.command[1] == "on"
     await db.update_settings(message.chat.id, data)
@@ -146,19 +156,19 @@ async def blacklist_filter(client, message):
         return
 
     data = await db.get_settings(message.chat.id) or {}
-    bl = data.get("blacklist", [])
+    blacklist = data.get("blacklist", [])
     warn_on = data.get("blacklist_warn", True)
     text = message.text.lower()
 
-    for w in bl:
-        if (w.endswith("*") and text.startswith(w[:-1])) or (w in text):
+    for word in blacklist:
+        if (word.endswith("*") and text.startswith(word[:-1])) or (word in text):
             await message.delete()
             if warn_on:
                 await warn_user(message.from_user.id, message.chat.id)
             return
 
 # =========================
-# DLINK SYSTEM (DELAYED DELETE)
+# DLINK (DELAYED DELETE)
 # =========================
 
 @Client.on_message(filters.group & filters.command("dlink"))
@@ -167,51 +177,57 @@ async def add_dlink(client, message):
         return
 
     args = message.text.split()
-    delay = 300
-    idx = 1
+    delay = 300  # default 5 min
+    index = 1
 
     if len(args) > 2 and args[1][-1] in ("m", "h") and args[1][:-1].isdigit():
         delay = int(args[1][:-1]) * (60 if args[1][-1] == "m" else 3600)
-        idx = 2
+        index = 2
 
-    word = " ".join(args[idx:]).lower()
+    word = " ".join(args[index:]).lower()
     data = await db.get_settings(message.chat.id) or {}
-    dl = data.get("dlink", {})
-    dl[word] = delay
-    data["dlink"] = dl
+    dlink = data.get("dlink", {})
+
+    dlink[word] = delay
+    data["dlink"] = dlink
     await db.update_settings(message.chat.id, data)
 
 @Client.on_message(filters.group & filters.command("removedlink"))
 async def remove_dlink(client, message):
     if not await is_admin(client, message.chat.id, message.from_user.id):
         return
+
     word = message.text.split(None, 1)[1].lower()
     data = await db.get_settings(message.chat.id) or {}
-    dl = data.get("dlink", {})
-    dl.pop(word, None)
-    data["dlink"] = dl
+    dlink = data.get("dlink", {})
+
+    dlink.pop(word, None)
+    data["dlink"] = dlink
     await db.update_settings(message.chat.id, data)
 
 @Client.on_message(filters.group & filters.command("dlinklist"))
 async def dlink_list(client, message):
     if not await is_admin(client, message.chat.id, message.from_user.id):
         return
+
     data = await db.get_settings(message.chat.id) or {}
-    dl = data.get("dlink", {})
-    if not dl:
-        return await message.reply("Dlink list empty")
+    dlink = data.get("dlink", {})
+
+    if not dlink:
+        return await message.reply("📭 Dlink list is empty")
+
     await message.reply(
-        "\n".join(f"• `{k}` → {v//60}m" for k, v in dl.items())
+        "\n".join(f"• `{k}` → {v//60}m" for k, v in dlink.items())
     )
 
 @Client.on_message(filters.group & filters.text)
 async def silent_dlink_handler(client, message):
     data = await db.get_settings(message.chat.id) or {}
-    dl = data.get("dlink", {})
+    dlink = data.get("dlink", {})
     text = message.text.lower()
 
-    for w, delay in dl.items():
-        if (w.endswith("*") and text.startswith(w[:-1])) or (w in text):
+    for word, delay in dlink.items():
+        if (word.endswith("*") and text.startswith(word[:-1])) or (word in text):
             await asyncio.sleep(delay)
             try:
                 await message.delete()
@@ -220,11 +236,56 @@ async def silent_dlink_handler(client, message):
             return
 
 # =========================
-# ANTI BOT
+# ANTI BOT PROTECTION
 # =========================
 
 @Client.on_message(filters.new_chat_members)
 async def anti_bot(client, message):
-    for u in message.new_chat_members:
-        if u.is_bot and not await is_admin(client, message.chat.id, message.from_user.id):
-            await client.ban_chat_member(message.chat.id, u.id)
+    for user in message.new_chat_members:
+        if user.is_bot and not await is_admin(client, message.chat.id, message.from_user.id):
+            await client.ban_chat_member(message.chat.id, user.id)
+
+# =========================
+# HELP COMMAND (GROUP ADMIN ONLY)
+# =========================
+
+@Client.on_message(filters.group & filters.command("help"))
+async def help_command(client, message):
+    if not await is_admin(client, message.chat.id, message.from_user.id):
+        return
+
+    help_text = (
+        "🛠️ **Admin Help Menu**\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        "👮 **Moderation (Reply Required):**\n"
+        "🔇 `/mute` – Mute a user (10 minutes)\n"
+        "🔊 `/unmute` – Unmute a user\n"
+        "🚫 `/ban` – Ban a user from group\n"
+        "⚠️ `/warn` – Give a warning\n"
+        "♻️ `/resetwarn` – Reset user warnings\n\n"
+
+        "🚫 **Blacklist System:**\n"
+        "➕ `/addblacklist <word/link>` – Add to blacklist\n"
+        "➖ `/removeblacklist <word/link>` – Remove from blacklist\n"
+        "📃 `/blacklist` – View blacklist\n"
+        "⚙️ `/blacklistwarn on | off` – Warn on blacklist match\n\n"
+
+        "⏱️ **Delayed Delete (DLINK):**\n"
+        "🕒 `/dlink <word>` – Delete after 5 minutes\n"
+        "🕒 `/dlink 10m <word>` – Delete after 10 minutes\n"
+        "🕒 `/dlink 1h <word>` – Delete after 1 hour\n"
+        "🗑️ `/removedlink <word>` – Remove delayed delete rule\n"
+        "📃 `/dlinklist` – View delayed delete list\n\n"
+
+        "🤖 **Auto Protection:**\n"
+        "• Anti-bot system is enabled\n"
+        "• Only admins can add bots\n\n"
+
+        "⚠️ **Notes:**\n"
+        "• Admin commands work only in groups\n"
+        "• Some commands must be used as a reply\n"
+        "• `/help` is admin-only\n"
+    )
+
+    await message.reply(help_text)
