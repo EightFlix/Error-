@@ -9,7 +9,7 @@ from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Callback
 from info import IS_STREAM, PM_FILE_DELETE_TIME, PROTECT_CONTENT, ADMINS
 from database.ia_filterdb import get_file_details
 from database.users_chats_db import db
-from utils import get_settings, get_size, get_shortlink, temp, is_premium
+from utils import get_settings, get_size, temp, is_premium
 
 
 # ======================================================
