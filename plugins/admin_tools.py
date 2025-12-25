@@ -267,7 +267,8 @@ async def premium_callbacks(bot, query: CallbackQuery):
         days = int(action.split("_")[-1])
         limit = now + timedelta(days=days)
 
-        users = db.get_premium_users()
+        # FIX 1: await the coroutine
+        users = await db.get_premium_users()
         result = []
 
         for u in users:
@@ -310,7 +311,8 @@ async def premium_callbacks(bot, query: CallbackQuery):
 
     # Expiry chart
     elif action == "prm_chart":
-        users = db.get_premium_users()
+        # FIX 2: await the coroutine
+        users = await db.get_premium_users()
         c_3 = c_7 = c_30 = c_30p = 0
 
         for u in users:
