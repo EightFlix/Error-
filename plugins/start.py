@@ -4,7 +4,6 @@ from hydrogram import Client, filters
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from info import PICS, script
-from utils import get_wish
 
 
 # ======================================================
