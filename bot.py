@@ -37,7 +37,7 @@ from utils import (
 )
 
 from database.users_chats_db import db
-from plugins.banned import auto_unban_worker
+# ❌ REMOVED: from plugins.banned import auto_unban_worker
 
 
 # ==========================
@@ -187,8 +187,8 @@ class Bot(Client):
         # 🔔 PREMIUM EXPIRY REMINDER
         asyncio.create_task(premium_expiry_reminder(self))
 
-        # 🚫 AUTO UNBAN WORKER
-        asyncio.create_task(auto_unban_worker(self))
+        # ❌ REMOVED: Auto unban worker (now in group_mgmt.py)
+        # asyncio.create_task(auto_unban_worker(self))
 
         # ⭐ PREMIUM AUTO-REMOVE (NEW)
         asyncio.create_task(check_and_remove_expired_premium(self))
