@@ -31,7 +31,8 @@ async def start_cmd(client, message):
         await message.reply_photo(
             photo=random.choice(PICS),
             caption=script.START_TXT.format(
-                message.from_user.mention
+                message.from_user.mention,
+                (await client.get_me()).mention
             ),
             reply_markup=start_buttons()
         )
@@ -39,7 +40,8 @@ async def start_cmd(client, message):
         # Fallback if photo fails
         await message.reply_text(
             text=script.START_TXT.format(
-                message.from_user.mention
+                message.from_user.mention,
+                (await client.get_me()).mention
             ),
             reply_markup=start_buttons()
         )
