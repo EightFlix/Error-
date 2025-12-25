@@ -39,6 +39,93 @@ if not hasattr(temp, 'message_activity'):
 
 
 # =====================================================
+# 🔧 ADMIN CHECK HELPER
+# =====================================================
+async def is_group_admin(client, chat_id, user_id):
+    """Check if user is admin in the group"""
+    try:
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status in (
+            enums.ChatMemberStatus.ADMINISTRATOR,
+            enums.ChatMemberStatus.OWNER
+        )
+    except:
+        return False
+
+
+# =====================================================
+# 🔄 SEARCH TOGGLE COMMANDS (ADMIN ONLY)
+# =====================================================
+@Client.on_message(filters.group & filters.command("search"))
+async def search_toggle(client, message):
+    """Toggle search on/off in group - Admin only"""
+    try:
+        # Check if user is admin
+        if not await is_group_admin(client, message.chat.id, message.from_user.id):
+            return await message.reply_text(
+                "❌ Only group admins can use this command.",
+                quote=True
+            )
+        
+        # Get current settings
+        settings = await db.get_settings(message.chat.id) or {}
+        
+        # Check for on/off parameter
+        args = message.text.split()
+        
+        if len(args) < 2:
+            # Show current status
+            current = settings.get("search", True)
+            status = "✅ Enabled" if current else "❌ Disabled"
+            
+            return await message.reply_text(
+                f"🔍 <b>Search Status:</b> {status}\n\n"
+                "💡 <b>Usage:</b>\n"
+                "• <code>/search on</code> - Enable search\n"
+                "• <code>/search off</code> - Disable search",
+                quote=True
+            )
+        
+        action = args[1].lower()
+        
+        if action == "on":
+            settings["search"] = True
+            await db.update_settings(message.chat.id, settings)
+            
+            return await message.reply_text(
+                "✅ <b>Search Enabled!</b>\n\n"
+                "Members can now search for files in this group.",
+                quote=True
+            )
+        
+        elif action == "off":
+            settings["search"] = False
+            await db.update_settings(message.chat.id, settings)
+            
+            return await message.reply_text(
+                "❌ <b>Search Disabled!</b>\n\n"
+                "File search has been turned off for this group.\n"
+                "Use <code>/search on</code> to enable again.",
+                quote=True
+            )
+        
+        else:
+            return await message.reply_text(
+                "❌ Invalid option. Use:\n"
+                "• <code>/search on</code>\n"
+                "• <code>/search off</code>",
+                quote=True
+            )
+    
+    except Exception as e:
+        print(f"Search toggle error: {e}")
+        await message.reply_text(
+            "❌ An error occurred. Please try again.",
+            quote=True
+        )
+
+
+# =====================================================
 # 🛡️ RATE LIMITER
 # =====================================================
 def is_rate_limited(user_id):
@@ -190,11 +277,13 @@ async def filter_handler(client, message):
             is_pm = True
 
         # ==============================
-        # 🚫 GROUP SEARCH
+        # 🚫 GROUP SEARCH - CHECK IF ENABLED
         # ==============================
         else:
-            stg = await db.get_settings(message.chat.id)
-            if not stg or stg.get("search") is False:
+            stg = await db.get_settings(message.chat.id) or {}
+            
+            # ✅ NEW: Check if search is disabled
+            if stg.get("search") is False:
                 return
 
             chat_id = message.chat.id
