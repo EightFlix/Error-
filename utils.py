@@ -1,27 +1,11 @@
 import asyncio
-import pytz
-import qrcode
 import time
-import random
-from io import BytesIO
 from datetime import datetime, timedelta
 
-from hydrogram.errors import UserNotParticipant, FloodWait
-from hydrogram.types import InlineKeyboardButton
+from hydrogram.errors import FloodWait
 
-from info import ADMINS, IS_PREMIUM, TIME_ZONE
+from info import ADMINS, IS_PREMIUM
 from database.users_chats_db import db
-from shortzy import Shortzy
-
-
-# =========================
-# OPTIONAL SHORTLINK
-# =========================
-try:
-    from info import SHORTLINK_API, SHORTLINK_URL
-except ImportError:
-    SHORTLINK_API = None
-    SHORTLINK_URL = None
 
 
 # ======================================================
@@ -36,11 +20,10 @@ class temp(object):
     B_NAME = None
 
     SETTINGS = {}
-    VERIFICATIONS = {}
     FILES = {}          # msg_id -> delivery data
     PREMIUM = {}        # RAM premium cache
     KEYWORDS = {}       # learned keywords (RAM)
-    BANNED_USERS = set()  # ✅ FIX: Added banned users set
+    BANNED_USERS = set()  # banned users set
 
     INDEX_STATS = {
         "running": False,
@@ -60,12 +43,12 @@ class temp(object):
 # 👑 PREMIUM CONFIG (Synced with premium.py)
 # ======================================================
 
-GRACE_PERIOD = timedelta(minutes=30)  # ✅ Synced: Changed from 20 to 30
+GRACE_PERIOD = timedelta(minutes=30)
 PREMIUM_CACHE_TTL = 600  # 10 min cache
 
 
 # ======================================================
-# ⚡ ULTRA FAST PREMIUM CHECK (Synced with premium.py)
+# ⚡ ULTRA FAST PREMIUM CHECK (Required by premium.py)
 # ======================================================
 
 async def is_premium(user_id, bot=None) -> bool:
@@ -73,6 +56,7 @@ async def is_premium(user_id, bot=None) -> bool:
     Koyeb optimized premium check with extended cache
     Returns True if user is premium, False otherwise
     Synced with premium.py grace period logic
+    ✅ REQUIRED BY PREMIUM.PY
     """
     # Admins always have premium
     if user_id in ADMINS:
@@ -129,18 +113,24 @@ async def is_premium(user_id, bot=None) -> bool:
 
 
 # ======================================================
-# 📅 DATETIME HELPERS (For premium.py compatibility)
+# 📅 DATETIME HELPERS (Required by premium.py)
 # ======================================================
 
 def get_expiry_datetime(expire):
-    """Convert expire timestamp/datetime to datetime object"""
+    """
+    Convert expire timestamp/datetime to datetime object
+    ✅ REQUIRED BY PREMIUM.PY
+    """
     if isinstance(expire, (int, float)):
         return datetime.utcfromtimestamp(expire)
     return expire
 
 
 def fmt(dt):
-    """Format datetime to readable string"""
+    """
+    Format datetime to readable string
+    ✅ REQUIRED BY PREMIUM.PY
+    """
     if isinstance(dt, (int, float)):
         dt = datetime.utcfromtimestamp(dt)
     return dt.strftime("%d %b %Y, %I:%M %p")
@@ -160,6 +150,7 @@ async def premium_expiry_reminder(bot):
     """
     Koyeb optimized reminder with batch processing
     Sends reminders at: 1 day, 6 hours, 1 hour before expiry
+    ✅ REQUIRED FOR PREMIUM SYSTEM
     """
     if temp._reminder_running:
         print("[INFO] Reminder task already running, skipping...")
@@ -246,32 +237,6 @@ async def premium_expiry_reminder(bot):
 
 
 # ======================================================
-# ✅ VERIFY SYSTEM (Koyeb Optimized)
-# ======================================================
-
-async def get_verify_status(user_id: int):
-    """Get verification status with error handling"""
-    try:
-        if user_id not in temp.VERIFICATIONS:
-            temp.VERIFICATIONS[user_id] = await db.get_verify_status(user_id)
-        return temp.VERIFICATIONS[user_id]
-    except Exception as e:
-        print(f"[ERROR] Get verify status error for user {user_id}: {e}")
-        return {}
-
-
-async def update_verify_status(user_id: int, **kwargs):
-    """Update verification status with error handling"""
-    try:
-        verify = await get_verify_status(user_id)
-        verify.update(kwargs)
-        temp.VERIFICATIONS[user_id] = verify
-        await db.update_verify_status(user_id, verify)
-    except Exception as e:
-        print(f"[ERROR] Update verify status error for user {user_id}: {e}")
-
-
-# ======================================================
 # 🧠 SEARCH LEARNING + SUGGESTIONS (Koyeb Optimized)
 # ======================================================
 
@@ -323,36 +288,6 @@ def suggest_query(query: str):
     except Exception as e:
         print(f"[ERROR] Suggest query error: {e}")
         return None
-
-
-# ======================================================
-# 🎉 GREETING SYSTEM
-# ======================================================
-
-EMOJI_DAY = ["🌞", "✨", "🌤"]
-EMOJI_NIGHT = ["🌙", "⭐", "😴"]
-
-
-def get_wish(user_name=None, premium=False):
-    """Get greeting message based on time of day"""
-    try:
-        hour = datetime.now(pytz.timezone(TIME_ZONE)).hour
-        emoji = random.choice(EMOJI_DAY if hour < 18 else EMOJI_NIGHT)
-        
-        if premium:
-            emoji = "👑 " + emoji
-
-        name = f", {user_name}" if user_name else ""
-        
-        if hour < 12:
-            return f"{emoji} Good Morning{name}"
-        elif hour < 18:
-            return f"{emoji} Good Afternoon{name}"
-        else:
-            return f"{emoji} Good Evening{name}"
-    except Exception as e:
-        print(f"[ERROR] Get wish error: {e}")
-        return "Hello!"
 
 
 # ======================================================
@@ -451,91 +386,6 @@ async def groups_broadcast_messages(chat_id, message, pin=False):
         except:
             pass
         return "Error"
-
-
-# ======================================================
-# 🔔 FORCE SUB CHECK (Koyeb Optimized)
-# ======================================================
-
-async def is_subscribed(bot, query):
-    """Check if user is subscribed to required channels"""
-    buttons = []
-
-    try:
-        # Premium users bypass force sub
-        if await is_premium(query.from_user.id, bot):
-            return buttons
-    except Exception as e:
-        print(f"[ERROR] Premium check error in is_subscribed: {e}")
-
-    try:
-        stg = await db.get_bot_sttgs()
-        if not stg or not stg.get("FORCE_SUB_CHANNELS"):
-            return buttons
-
-        channels = stg["FORCE_SUB_CHANNELS"].split()
-        
-        for cid in channels:
-            try:
-                chat = await bot.get_chat(int(cid))
-                await bot.get_chat_member(int(cid), query.from_user.id)
-            except UserNotParticipant:
-                invite = getattr(chat, 'invite_link', None)
-                if invite:
-                    buttons.append(
-                        [InlineKeyboardButton(f"📢 Join {chat.title}", url=invite)]
-                    )
-            except Exception as e:
-                print(f"[ERROR] Force sub check error for channel {cid}: {e}")
-                continue
-    except Exception as e:
-        print(f"[ERROR] is_subscribed error: {e}")
-
-    return buttons
-
-
-# ======================================================
-# 🔳 QR CODE (Koyeb Optimized)
-# ======================================================
-
-async def generate_qr_code(data: str):
-    """Generate QR code with error handling"""
-    try:
-        qr = qrcode.QRCode(box_size=10, border=4)
-        qr.add_data(data)
-        qr.make(fit=True)
-
-        img = qr.make_image(fill_color="black", back_color="white")
-        bio = BytesIO()
-        bio.name = "qr.png"
-        img.save(bio, "PNG")
-        bio.seek(0)
-        return bio
-    except Exception as e:
-        print(f"[ERROR] QR generation error: {e}")
-        return None
-
-
-# ======================================================
-# 📦 SHORTLINK (Koyeb Optimized)
-# ======================================================
-
-async def get_shortlink(url, api, link):
-    """Get shortlink with timeout and error handling"""
-    if not api or not url:
-        return link
-    
-    try:
-        return await asyncio.wait_for(
-            Shortzy(api_key=api, base_site=url).convert(link),
-            timeout=10.0
-        )
-    except asyncio.TimeoutError:
-        print(f"[WARN] Shortlink timeout")
-        return link
-    except Exception as e:
-        print(f"[ERROR] Shortlink error: {e}")
-        return link
 
 
 # ======================================================
