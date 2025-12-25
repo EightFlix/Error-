@@ -5,6 +5,7 @@ import time
 from struct import pack
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Any
+from difflib import SequenceMatcher
 
 from hydrogram.file_id import FileId
 from pymongo import MongoClient, TEXT, ASCENDING
@@ -32,7 +33,6 @@ try:
     )
     db = client[DATABASE_NAME]
     collection = db[COLLECTION_NAME]
-    # Test connection
     client.server_info()
     logger.info("✅ Database connected successfully")
 except Exception as e:
@@ -47,7 +47,6 @@ def ensure_indexes(col) -> None:
     try:
         indexes = col.index_information()
 
-        # Text search index
         if "file_text_index" not in indexes:
             try:
                 col.create_index(
@@ -59,12 +58,10 @@ def ensure_indexes(col) -> None:
             except OperationFailure as e:
                 logger.warning(f"⚠️ Text index skipped: {e}")
 
-        # Quality index for filtering
         if "quality_idx" not in indexes:
             col.create_index([("quality", ASCENDING)], name="quality_idx")
             logger.info("✅ Quality index created")
 
-        # Updated timestamp index
         if "updated_at_idx" not in indexes:
             col.create_index([("updated_at", ASCENDING)], name="updated_at_idx")
             logger.info("✅ Updated_at index created")
@@ -89,7 +86,7 @@ def db_count_documents() -> int:
 # ⚡ LIGHTWEIGHT CACHE
 # =====================================================
 SEARCH_CACHE: Dict[str, Tuple[Any, float]] = {}
-CACHE_TTL = 30  # seconds
+CACHE_TTL = 30
 MAX_CACHE_SIZE = 1000
 
 def cache_get(key: str) -> Optional[Any]:
@@ -107,7 +104,6 @@ def cache_get(key: str) -> Optional[Any]:
 
 def cache_set(key: str, value: Any) -> None:
     """Set cache value with size limit"""
-    # Clean old entries if cache is too large
     if len(SEARCH_CACHE) >= MAX_CACHE_SIZE:
         oldest = min(SEARCH_CACHE.items(), key=lambda x: x[1][1])
         SEARCH_CACHE.pop(oldest[0], None)
@@ -142,7 +138,83 @@ def detect_quality(name: str) -> str:
     return "unknown"
 
 # =====================================================
-# 🔎 SMART SEARCH ENGINE
+# 🎯 FUZZY MATCHING UTILITIES
+# =====================================================
+def normalize_string(s: str) -> str:
+    """Normalize string for fuzzy comparison"""
+    if not s:
+        return ""
+    # Remove special chars, convert to lowercase
+    s = re.sub(r'[^\w\s]', '', s.lower())
+    # Remove extra spaces
+    s = re.sub(r'\s+', ' ', s.strip())
+    return s
+
+def calculate_similarity(str1: str, str2: str) -> float:
+    """Calculate similarity ratio between two strings (0-1)"""
+    if not str1 or not str2:
+        return 0.0
+    
+    norm1 = normalize_string(str1)
+    norm2 = normalize_string(str2)
+    
+    return SequenceMatcher(None, norm1, norm2).ratio()
+
+def generate_fuzzy_variants(query: str) -> List[str]:
+    """Generate intelligent fuzzy search variants"""
+    if not query or len(query) < 3:
+        return [query]
+    
+    variants = [query]
+    q_lower = query.lower()
+    
+    # Common typo patterns
+    typo_map = {
+        'o': ['0', 'oo'],
+        '0': ['o'],
+        'i': ['1', 'l'],
+        '1': ['i', 'l'],
+        'l': ['i', '1'],
+        's': ['5', 'z'],
+        '5': ['s'],
+        'e': ['3'],
+        'a': ['4', '@'],
+        't': ['7'],
+    }
+    
+    # Generate variants for first 2 characters only (performance)
+    for i, char in enumerate(q_lower[:2]):
+        if char in typo_map:
+            for replacement in typo_map[char]:
+                variant = q_lower[:i] + replacement + q_lower[i+1:]
+                if variant not in variants:
+                    variants.append(variant)
+    
+    # Add variant without spaces
+    no_space = q_lower.replace(' ', '')
+    if len(no_space) > 2 and no_space not in variants:
+        variants.append(no_space)
+    
+    return variants[:5]  # Limit to 5 variants max
+
+def should_use_fuzzy(query: str) -> bool:
+    """Decide if fuzzy search should be triggered"""
+    # Use fuzzy only for:
+    # - Short queries (3-15 chars) where typos are common
+    # - Queries without special patterns
+    q = query.strip()
+    
+    if len(q) < 3 or len(q) > 15:
+        return False
+    
+    # Don't use fuzzy if query has special filters
+    if any(x in q.lower() for x in ['720p', '1080p', '480p', '2160p', '4k']):
+        return False
+    
+    return True
+
+# =====================================================
+# 🔎 SMART SEARCH ENGINE WITH FUZZY
 # =====================================================
 async def get_search_results(
     query: str,
@@ -150,10 +222,9 @@ async def get_search_results(
     max_results: int = MAX_BTN
 ) -> Tuple[List[Dict], str, int]:
     """
-    Search files with text search + regex fallback
+    Search files with text search → regex → fuzzy fallback
     Returns: (files, next_offset, total_count)
     """
-    # Validate input
     q = query.strip()
     if len(q) < 2:
         return [], "", 0
@@ -168,9 +239,10 @@ async def get_search_results(
 
     files = []
     total = 0
+    search_method = ""
 
     # ===============================================
-    # METHOD 1: TEXT SEARCH (FAST & RELEVANT)
+    # METHOD 1: TEXT SEARCH (FASTEST)
     # ===============================================
     text_filter = {"$text": {"$search": q}}
 
@@ -189,22 +261,20 @@ async def get_search_results(
         files = list(cursor)
         
         if files:
-            # Count with limit for performance
             total = collection.count_documents(text_filter, limit=10000)
+            search_method = "text"
 
     except Exception as e:
         logger.error(f"Text search error: {e}")
 
     # ===============================================
-    # METHOD 2: REGEX FALLBACK (SLOWER BUT ACCURATE)
+    # METHOD 2: REGEX FALLBACK
     # ===============================================
     if not files:
         try:
-            # Escape special regex characters
             escaped_query = re.escape(q)
             regex = re.compile(escaped_query, re.IGNORECASE)
             
-            # Build filter based on caption setting
             if USE_CAPTION_FILTER:
                 rg_filter = {"$or": [{"file_name": regex}, {"caption": regex}]}
             else:
@@ -218,17 +288,71 @@ async def get_search_results(
             files = list(cursor)
             
             if files:
-                # Limit count for performance
-                total = min(
-                    collection.count_documents(rg_filter, limit=5000),
-                    5000
-                )
+                total = min(collection.count_documents(rg_filter, limit=5000), 5000)
+                search_method = "regex"
         
         except Exception as e:
             logger.error(f"Regex search error: {e}")
 
+    # ===============================================
+    # METHOD 3: INTELLIGENT FUZZY SEARCH (ONLY IF NEEDED)
+    # ===============================================
+    if not files and should_use_fuzzy(q) and offset == 0:
+        try:
+            fuzzy_results = []
+            variants = generate_fuzzy_variants(q)
+            
+            # Try each variant (but limit DB queries)
+            for variant in variants[:3]:  # Max 3 variants
+                escaped = re.escape(variant)
+                regex = re.compile(escaped, re.IGNORECASE)
+                
+                if USE_CAPTION_FILTER:
+                    fuzzy_filter = {"$or": [{"file_name": regex}, {"caption": regex}]}
+                else:
+                    fuzzy_filter = {"file_name": regex}
+                
+                cursor = collection.find(
+                    fuzzy_filter,
+                    {"file_name": 1, "file_size": 1, "caption": 1, "quality": 1}
+                ).limit(max_results * 2)  # Get more for scoring
+                
+                variant_files = list(cursor)
+                
+                if variant_files:
+                    # Score each result by similarity
+                    for f in variant_files:
+                        similarity = calculate_similarity(q, f.get('file_name', ''))
+                        if similarity >= 0.6:  # 60% similarity threshold
+                            f['fuzzy_score'] = similarity
+                            fuzzy_results.append(f)
+            
+            if fuzzy_results:
+                # Remove duplicates and sort by fuzzy score
+                seen = set()
+                unique_results = []
+                
+                for f in sorted(fuzzy_results, key=lambda x: x.get('fuzzy_score', 0), reverse=True):
+                    fid = f.get('_id')
+                    if fid not in seen:
+                        seen.add(fid)
+                        unique_results.append(f)
+                
+                files = unique_results[:max_results]
+                total = len(unique_results)
+                search_method = "fuzzy"
+                
+                logger.info(f"🎯 Fuzzy search activated: '{q}' → {len(files)} results")
+        
+        except Exception as e:
+            logger.error(f"Fuzzy search error: {e}")
+
     # Calculate next offset
     next_offset = str(offset + max_results) if total > offset + max_results else ""
+    
+    # Log search performance
+    if files:
+        logger.debug(f"Search: '{q}' | Method: {search_method} | Results: {len(files)}")
     
     result = (files, next_offset, total)
     cache_set(cache_key, result)
@@ -248,8 +372,6 @@ async def delete_files(query: str) -> int:
         regex = re.compile(escaped_query, re.IGNORECASE)
         
         res = collection.delete_many({"file_name": regex})
-        
-        # Clear cache after deletion
         cache_clear()
         
         return res.deleted_count
@@ -280,7 +402,6 @@ def clean_text(text: str) -> str:
     if not text:
         return ""
     
-    # Remove usernames, URLs, special chars
     cleaned = re.sub(r'@\w+', '', text)
     cleaned = re.sub(r'https?://\S+', '', cleaned)
     cleaned = re.sub(r'[_\-\.+]+', ' ', cleaned)
@@ -297,22 +418,15 @@ async def save_file(media) -> str:
     Returns: 'suc' (new), 'dup' (updated), 'err' (failed)
     """
     try:
-        # Validate input
         if not media or not hasattr(media, 'file_id'):
             return "err"
         
-        # Generate unique file ID
         file_id = unpack_new_file_id(media.file_id)
-        
-        # Clean and prepare data
         file_name = clean_text(getattr(media, 'file_name', None) or "Untitled")
         caption = clean_text(getattr(media, 'caption', None) or "")
         file_size = getattr(media, 'file_size', 0)
-        
-        # Detect quality
         quality = detect_quality(file_name)
 
-        # Prepare document
         doc = {
             "_id": file_id,
             "file_name": file_name,
@@ -322,13 +436,11 @@ async def save_file(media) -> str:
             "updated_at": datetime.utcnow()
         }
 
-        # Try insert (new file)
         try:
             collection.insert_one(doc)
             return "suc"
 
         except DuplicateKeyError:
-            # File exists, update caption and quality
             collection.update_one(
                 {"_id": file_id},
                 {
@@ -367,9 +479,7 @@ async def update_file_caption(file_id: str, new_caption: str) -> bool:
             }
         )
         
-        # Clear cache on update
         cache_clear()
-        
         return res.modified_count > 0
     
     except Exception as e:
@@ -456,10 +566,10 @@ async def database_health_check() -> Dict[str, Any]:
             "status": "healthy",
             "total_files": db_count_documents(),
             "cache_size": len(SEARCH_CACHE),
-            "connected": True
+            "connected": True,
+            "fuzzy_enabled": True
         }
         
-        # Test query
         collection.find_one({})
         
         return stats
