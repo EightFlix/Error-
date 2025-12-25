@@ -9,7 +9,6 @@ class script(object):
         "📌 Just send any movie / series name\n"
         "📌 Works in Groups & PM\n"
         "📌 Premium unlocks extra power 💎\n\n"
-        "➕ Add me to your group as <b>Admin</b> to activate Auto Filter 🚀"
     )
 
     # ================= STATUS =================
