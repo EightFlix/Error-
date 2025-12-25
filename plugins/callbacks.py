@@ -27,7 +27,7 @@ from info import (
     script
 )
 
-from utils import is_premium, get_wish, temp
+from utils import is_premium, temp  # ✅ REMOVED: get_wish
 from database.users_chats_db import db
 from database.ia_filterdb import db_count_documents
 
